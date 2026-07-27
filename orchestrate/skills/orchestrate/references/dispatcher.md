@@ -16,6 +16,8 @@ One-time setup: run `bun install` inside this skill's `scripts/` directory if `n
 bun cli.ts kickoff "<goal>" [--repo <url>] [--ref main] [--model claude-opus-4-8] [--slack-channel C123] [--dispatcher-name "Alex"]
 ```
 
+A repo can replace the model catalog planners choose from, including each task type's default, with `ORCHESTRATE_MODEL_CATALOG` (see the plugin README). That does not cover the root planner: pass `--model` to set it, otherwise it stays `claude-opus-4-8`. Run `bun cli.ts models` to print the catalog in effect; config the CLI can't read exits 2 with the offending entry named.
+
 The CLI reads `CURSOR_API_KEY`, auto-detects the repo from `git config --get remote.origin.url`, builds the spawn prompt, spawns via `cursor-sdk`, and prints `{ agentId, runId, status, url, dispatcherFirstName }` JSON. Slack is optional. If `SLACK_BOT_TOKEN` is set, also pass `--slack-channel <id>` or set `SLACK_CHANNEL_ID`; otherwise kickoff fails before spawning. If the token is unset, Slack stays disabled.
 
 ## Dispatcher identity
