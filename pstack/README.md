@@ -177,7 +177,7 @@ pstack also ships a subagent that runs my style end to end. spawn it from a pare
 
 ## principles
 
-twenty-one short skills, one principle each. `poteto-mode` indexes them inline and reads that index at task start. the standalone files are there so other skills can reference a principle by name, and so the index can point at the full rule for each.
+twenty-one short skills, one principle each. the playbooks carry each rule inline at the step where it applies, and `poteto-mode` keeps a pointer index read at task start. the standalone files are the deep references: other skills point at a principle by name, and the index points at the full rule for each.
 
 <details>
 <summary>all twenty-one principles</summary>

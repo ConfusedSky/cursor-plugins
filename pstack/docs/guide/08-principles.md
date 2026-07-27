@@ -1,6 +1,6 @@
 # Steer with principle names
 
-pstack ships 21 principles as individual skills. `/poteto-mode` reads their index at the start of every multi-step task, applies the ones the task triggers, and names each applied principle in its reply along with the decision it changed.
+pstack ships 21 principles as individual skills. Each playbook carries the rules that matter for its work inline, at the step where they apply, and the root skill keeps the cross-cutting rules plus a pointer index it reads at the start of every multi-step task. The leaf skills are the deep references.
 
 You don't invoke principles. You use their names to steer. Each name points at a complete rule the agent has already read, so one phrase redirects the work more precisely than a paragraph of instructions.
 
@@ -24,7 +24,7 @@ Say two parallel attempts are about to write to the same branch:
 separate before serializing shared state. give each attempt its own worktree, no locks.
 ```
 
-Each phrase lands because the rule behind it is specific. The agent still has to say, in its reply, which decision the rule changed. A principle citation with no decision behind it is the tell that it name-dropped instead of applying.
+Each phrase lands because the rule behind it is specific. Naming one sends the agent to the leaf skill for the full treatment, not just the inline sentence it already met in the playbook.
 
 ## The 21, briefly
 
