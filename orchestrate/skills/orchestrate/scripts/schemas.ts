@@ -504,31 +504,34 @@ const ModelSelectionSchema = z
   .object({
     id: z.string().min(1).describe("Model id as accepted by the Cursor API."),
     params: z
-      .array(z.object({ id: z.string(), value: z.string() }))
+      .array(z.object({ id: z.string(), value: z.string() }).strict())
       .optional()
       .describe("Model parameters, e.g. reasoning, effort, thinking, fast."),
   })
+  .strict()
   .describe("Canonical SDK selection passed to `Agent.create({ model })`.");
 
-const ModelProfileSchema = z.object({
-  slug: z
-    .string()
-    .min(1)
-    .describe("Authoring name planners write into `tasks[].model`."),
-  selection: ModelSelectionSchema,
-  summary: z.string().describe("One-line description planners read."),
-  strengths: z
-    .array(z.string())
-    .describe("Capability keywords planners match a task against."),
-  speed: z.string().describe("Relative latency, e.g. fast, medium, slow."),
-  use: z.string().describe("When a planner should pick this model."),
-  defaultFor: z
-    .array(TaskTypeSchema)
-    .optional()
-    .describe(
-      "Task types that use this model when `tasks[].model` is omitted."
-    ),
-});
+const ModelProfileSchema = z
+  .object({
+    slug: z
+      .string()
+      .min(1)
+      .describe("Authoring name planners write into `tasks[].model`."),
+    selection: ModelSelectionSchema,
+    summary: z.string().describe("One-line description planners read."),
+    strengths: z
+      .array(z.string())
+      .describe("Capability keywords planners match a task against."),
+    speed: z.string().describe("Relative latency, e.g. fast, medium, slow."),
+    use: z.string().describe("When a planner should pick this model."),
+    defaultFor: z
+      .array(TaskTypeSchema)
+      .optional()
+      .describe(
+        "Task types that use this model when `tasks[].model` is omitted."
+      ),
+  })
+  .strict();
 
 export const ModelCatalogSchema = z.array(ModelProfileSchema);
 

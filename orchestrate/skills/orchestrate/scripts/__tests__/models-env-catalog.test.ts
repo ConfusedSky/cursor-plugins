@@ -144,6 +144,36 @@ describe("catalog config errors", () => {
     expect(() => assertModelEnvConfig()).not.toThrow();
   });
 
+  test("duplicate slugs fail at startup", () => {
+    setCatalog([
+      entry({ defaultFor: ["worker"] }),
+      entry({
+        slug: "house-worker",
+        selection: { id: "gpt-5.5" },
+        defaultFor: ["subplanner", "verifier"],
+      }),
+    ]);
+    expect(() => assertModelEnvConfig()).toThrow(PlanValidationError);
+    expect(() => assertModelEnvConfig()).toThrow(
+      /duplicate slug "house-worker"/
+    );
+  });
+
+  test("multiple defaults for the same task type fail at startup", () => {
+    setCatalog([
+      entry({ defaultFor: ["worker"] }),
+      entry({
+        slug: "house-planner",
+        selection: { id: "claude-opus-4-8" },
+        defaultFor: ["worker", "subplanner", "verifier"],
+      }),
+    ]);
+    expect(() => assertModelEnvConfig()).toThrow(PlanValidationError);
+    expect(() => assertModelEnvConfig()).toThrow(
+      /assigns worker default to both "house-worker" and "house-planner"/
+    );
+  });
+
   test("malformed JSON is rejected", () => {
     process.env[MODEL_ENV_CATALOG] = "[{slug:}]";
     expect(() => effectiveModelCatalog()).toThrow(/is not valid JSON/);
@@ -163,6 +193,21 @@ describe("catalog config errors", () => {
 
     setCatalog([entry({ defaultFor: ["planner"] })]);
     expect(() => effectiveModelCatalog()).toThrow(/\[0\]\.defaultFor/);
+  });
+
+  test("unknown keys on an entry or selection are rejected", () => {
+    setCatalog([entry({ summry: "typo" })]);
+    expect(() => effectiveModelCatalog()).toThrow(PlanValidationError);
+
+    setCatalog([
+      entry({
+        selection: {
+          id: "composer-2.5",
+          param: [{ id: "fast", value: "true" }],
+        },
+      }),
+    ]);
+    expect(() => effectiveModelCatalog()).toThrow(/\[0\]\.selection/);
   });
 
   test("a non-array value is rejected", () => {

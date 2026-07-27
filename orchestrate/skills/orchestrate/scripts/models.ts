@@ -202,9 +202,36 @@ export function resolveModelSelection(slug: string): ModelSelection {
 
 /**
  * Surface a broken catalog at CLI startup rather than as a spawn failure
- * partway through a run.
+ * partway through a run. Rejects duplicate slugs and multiple defaults for
+ * the same task type so resolution can't silently pick the first match.
  */
 export function assertModelEnvConfig(): void {
+  const catalog = effectiveModelCatalog();
+  const source = envCatalogJson() ? MODEL_ENV_CATALOG : "MODEL_CATALOG";
+
+  const seenSlugs = new Set<string>();
+  for (const m of catalog) {
+    if (seenSlugs.has(m.slug)) {
+      throw new PlanValidationError(
+        `${source} has duplicate slug "${m.slug}". Each slug must appear once.`
+      );
+    }
+    seenSlugs.add(m.slug);
+  }
+
+  const defaultOwners = new Map<TaskType, string>();
+  for (const m of catalog) {
+    for (const type of m.defaultFor ?? []) {
+      const existing = defaultOwners.get(type);
+      if (existing !== undefined) {
+        throw new PlanValidationError(
+          `${source} assigns ${type} default to both "${existing}" and "${m.slug}". Only one entry may list each task type in defaultFor.`
+        );
+      }
+      defaultOwners.set(type, m.slug);
+    }
+  }
+
   for (const type of TASK_TYPES) defaultModelForType(type);
 }
 
