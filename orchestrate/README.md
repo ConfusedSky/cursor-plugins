@@ -10,28 +10,65 @@ The skill itself lives in [`skills/orchestrate/SKILL.md`](./skills/orchestrate/S
 - A Cursor API key in `CURSOR_API_KEY`.
 - Optional Slack app and bot token if you want a Slack thread mirroring the run.
 
-## Model defaults (optional)
+## Model configuration (optional)
 
-When a task omits `tasks[].model`, orchestrate picks a catalog default per role. Override those with env vars (useful for cost-efficient pairings without editing the plugin):
+The built-in `MODEL_CATALOG` is merged with environment config into an **effective catalog**. That merged catalog is what planners see when they set `tasks[].model`, what `bun cli.ts models` prints, and what supplies role defaults when `tasks[].model` is omitted. Use it to steer cost without editing the plugin.
 
-| Env var | Role | Example |
-| --- | --- | --- |
-| `ORCHESTRATE_MODEL_WORKER` | worker fallback | `composer-2-fast` |
-| `ORCHESTRATE_MODEL_SUBPLANNER` | subplanner fallback | `claude-opus-4-8` |
-| `ORCHESTRATE_MODEL_VERIFIER` | verifier fallback | `claude-opus-4-8` |
-| `ORCHESTRATE_MODEL_ROOT` | kickoff `--model` default | `claude-opus-4-8` |
+### Role defaults
 
-Each value may be:
+| Env var | Role |
+| --- | --- |
+| `ORCHESTRATE_MODEL_WORKER` | worker default |
+| `ORCHESTRATE_MODEL_SUBPLANNER` | subplanner default |
+| `ORCHESTRATE_MODEL_VERIFIER` | verifier default |
+| `ORCHESTRATE_MODEL_ROOT` | kickoff `--model` default |
 
-1. A catalog slug (e.g. `composer-2-fast`) — resolved with the catalog's SDK params.
-2. A bare model id (e.g. `composer-2.5`) — sent as `{ id }` (may fail if the backend needs params).
-3. A JSON `ModelSelection` for models not in the catalog yet:
+Each value may be a catalog slug (`composer-2-fast`), a bare model id (`composer-2.5`), or a JSON entry:
 
 ```bash
-export ORCHESTRATE_MODEL_WORKER='{"id":"composer-2.5","params":[{"id":"fast","value":"true"}]}'
+export ORCHESTRATE_MODEL_WORKER=composer-2-fast
+export ORCHESTRATE_MODEL_SUBPLANNER='{"id":"composer-2.5","params":[{"id":"fast","value":"true"}]}'
 ```
 
-Explicit `tasks[].model` in the plan always wins over these env defaults. Run `bun cli.ts models` to see the catalog with env overrides applied.
+Anything named this way joins the effective catalog, so planners can select it by slug and it resolves back to the full selection (params included). A JSON entry may also carry `slug`, `summary`, `use`, `speed`, and `strengths` — worth setting, since planners choose by the capability prose:
+
+```bash
+export ORCHESTRATE_MODEL_WORKER='{"slug":"house-worker","id":"composer-2.5","summary":"House worker model.","use":"Use for all bounded implementation work.","speed":"fast","strengths":["throughput"]}'
+```
+
+### Adding models
+
+`ORCHESTRATE_MODEL_CATALOG` takes a JSON array of entries. Entries with an `id` define a model; entries with only a `slug` pull in a built-in by reference. `defaultFor` claims a role.
+
+```bash
+export ORCHESTRATE_MODEL_CATALOG='[
+  {"id":"composer-2.5","summary":"Cheap, fast worker.","defaultFor":["worker"]},
+  {"slug":"claude-opus-4-8","defaultFor":["subplanner","verifier"]}
+]'
+```
+
+### Restricting the menu
+
+`ORCHESTRATE_MODEL_CATALOG_MODE=env-only` drops the built-in catalog, so planners see exactly the models you list (built-ins can be pulled back in by slug). Every role needs a default in this mode; the CLI exits with a config error if one is missing.
+
+```bash
+export ORCHESTRATE_MODEL_CATALOG_MODE=env-only
+export ORCHESTRATE_MODEL_CATALOG='[
+  {"slug":"composer-2-fast","defaultFor":["worker"]},
+  {"slug":"claude-opus-4-8","defaultFor":["subplanner","verifier"]}
+]'
+```
+
+### Precedence and limits
+
+1. Explicit `tasks[].model` in the plan
+2. Role env var (`ORCHESTRATE_MODEL_<ROLE>`)
+3. `defaultFor` on an `ORCHESTRATE_MODEL_CATALOG` entry
+4. `defaultFor` in the built-in catalog
+
+Run `bun cli.ts models` to see the effective catalog, and `bun cli.ts models --check` to probe every entry (including your env-defined ones) against `/v1/agents`.
+
+Two caveats. This shapes what planners choose from, but a planner can still write any model id into `tasks[].model`, so it is guidance rather than a spend ceiling. And each spawned agent reads its own environment: set these as Cursor Cloud secrets for the repo so subplanners and workers inherit them, not just in the dispatcher's local shell.
 
 ## Cursor API key
 
