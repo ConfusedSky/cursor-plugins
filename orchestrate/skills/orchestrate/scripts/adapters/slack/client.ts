@@ -5,12 +5,17 @@ export const SLACK_TOKEN_ENV = "ORCHESTRATE_SLACK_BOT_TOKEN";
 
 const LEGACY_SLACK_TOKEN_ENV = "SLACK_BOT_TOKEN";
 
+function readSlackToken(): string | undefined {
+  const token = process.env[SLACK_TOKEN_ENV]?.trim();
+  return token || undefined;
+}
+
 export function slackTokenConfigured(): boolean {
-  return Boolean(process.env[SLACK_TOKEN_ENV]?.trim());
+  return Boolean(readSlackToken());
 }
 
 export function createSlackWebClient(): WebClient | undefined {
-  const token = process.env[SLACK_TOKEN_ENV];
+  const token = readSlackToken();
   if (!token) {
     // Losing Slack silently after the rename would look like an outage, so
     // name the old variable when it's the only one set.
