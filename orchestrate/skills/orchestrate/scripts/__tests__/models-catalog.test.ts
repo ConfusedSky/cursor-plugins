@@ -4,33 +4,22 @@ import {
   defaultModelForType,
   isKnownModel,
   MODEL_CATALOG,
-  MODEL_ENV_BY_TYPE,
-  MODEL_ENV_ROOT,
+  MODEL_ENV_CATALOG,
   resolveModelSelection,
 } from "../models.ts";
 
-const ENV_KEYS = [
-  MODEL_ENV_BY_TYPE.worker,
-  MODEL_ENV_BY_TYPE.subplanner,
-  MODEL_ENV_BY_TYPE.verifier,
-  MODEL_ENV_ROOT,
-] as const;
+let savedCatalogEnv: string | undefined;
 
-const savedEnv: Record<string, string | undefined> = {};
-
+// These assertions describe the built-in catalog, so an env-provided catalog
+// from the surrounding shell must not leak in.
 beforeEach(() => {
-  for (const key of ENV_KEYS) {
-    savedEnv[key] = process.env[key];
-    delete process.env[key];
-  }
+  savedCatalogEnv = process.env[MODEL_ENV_CATALOG];
+  delete process.env[MODEL_ENV_CATALOG];
 });
 
 afterEach(() => {
-  for (const key of ENV_KEYS) {
-    const prior = savedEnv[key];
-    if (prior === undefined) delete process.env[key];
-    else process.env[key] = prior;
-  }
+  if (savedCatalogEnv === undefined) delete process.env[MODEL_ENV_CATALOG];
+  else process.env[MODEL_ENV_CATALOG] = savedCatalogEnv;
 });
 
 describe("MODEL_CATALOG", () => {

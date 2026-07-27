@@ -110,7 +110,7 @@ export function registerTaskCommands(program: Command): void {
     .option("--ref <ref>", "Starting git ref for the cloud workspace", "main")
     .option(
       "--model <id>",
-      "Model id for the root planner (catalog slug, bare id, or JSON ModelSelection). Defaults to ORCHESTRATE_MODEL_ROOT, else claude-opus-4-8.",
+      'Model id for the root planner (catalog slug, bare id, or JSON ModelSelection). Defaults to the catalog entry marked defaultFor ["root"], else claude-opus-4-8.',
       defaultRootModel()
     )
     .option(

@@ -2,9 +2,21 @@ import type { ModelSelection } from "@cursor/sdk";
 
 import type { TaskType } from "./adapters/types.ts";
 
-// Built-in model catalog. `buildEffectiveCatalog` merges this with the
-// ORCHESTRATE_MODEL_* env config to produce what planners actually see;
-// `defaultFor` supplies the fallback when `tasks[].model` is omitted.
+// Built-in model catalog, used when ORCHESTRATE_MODEL_CATALOG is unset.
+// `defaultFor` supplies the model for a role when `tasks[].model` is omitted.
+
+/** Roles a catalog entry can be the default for. `root` is the kickoff planner. */
+export type CatalogRole = TaskType | "root";
+
+export const CATALOG_ROLES: CatalogRole[] = [
+  "worker",
+  "subplanner",
+  "verifier",
+  "root",
+];
+
+/** Roles that must resolve for a run to be spawnable. */
+const REQUIRED_ROLES: TaskType[] = ["worker", "subplanner", "verifier"];
 
 export interface ModelProfile {
   /** User-facing slug for `tasks[].model` and `--model` flags. */
@@ -15,25 +27,15 @@ export interface ModelProfile {
   strengths: string[];
   speed: "fast" | "medium" | "slow";
   use: string;
-  /** Task types this profile is the default for. */
-  defaultFor?: TaskType[];
+  /** Roles this profile is the default for. */
+  defaultFor?: CatalogRole[];
 }
 
-/** Env vars that override catalog `defaultFor` when set (non-empty). */
-export const MODEL_ENV_BY_TYPE: Record<TaskType, string> = {
-  worker: "ORCHESTRATE_MODEL_WORKER",
-  subplanner: "ORCHESTRATE_MODEL_SUBPLANNER",
-  verifier: "ORCHESTRATE_MODEL_VERIFIER",
-};
-
-/** Env var that overrides the kickoff `--model` default for the root planner. */
-export const MODEL_ENV_ROOT = "ORCHESTRATE_MODEL_ROOT";
-
-/** Env var holding a JSON array of extra catalog entries. */
+/**
+ * Env var holding the whole catalog as JSON. When set it replaces
+ * MODEL_CATALOG outright; entries may still reference a built-in by slug.
+ */
 export const MODEL_ENV_CATALOG = "ORCHESTRATE_MODEL_CATALOG";
-
-/** Env var selecting `merge` (default) or `env-only` catalog construction. */
-export const MODEL_ENV_CATALOG_MODE = "ORCHESTRATE_MODEL_CATALOG_MODE";
 
 export const DEFAULT_ROOT_MODEL = "claude-opus-4-8";
 
@@ -183,17 +185,10 @@ export const MODEL_CATALOG: ModelProfile[] = [
   },
 ];
 
-/** Raised when the ORCHESTRATE_MODEL_* environment config is not usable. */
+/** Raised when ORCHESTRATE_MODEL_CATALOG is not usable. */
 export class ModelConfigError extends Error {}
 
-const ALL_TASK_TYPES: TaskType[] = ["worker", "subplanner", "verifier"];
-
 const SPEEDS = new Set<ModelProfile["speed"]>(["fast", "medium", "slow"]);
-
-function readEnvOverride(name: string): string | undefined {
-  const raw = process.env[name]?.trim();
-  return raw || undefined;
-}
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -247,12 +242,7 @@ export function normalizeModelSelection(
   return selection;
 }
 
-/**
- * Parse a JSON `ModelSelection` (`{"id":"…","params":[…]}`).
- *
- * JSON form is for models not yet in MODEL_CATALOG (e.g. composer-2.5) where
- * a bare `{ id: slug }` would lose required params or fail `invalid_model`.
- */
+/** Parse a JSON `ModelSelection` (`{"id":"…","params":[…]}`). */
 export function parseModelSelectionJson(
   raw: string,
   ctx = "invalid model selection JSON"
@@ -273,23 +263,6 @@ export function formatModelSelectionLabel(selection: ModelSelection): string {
   return `${selection.id} (${params})`;
 }
 
-export type CatalogMode = "merge" | "env-only";
-
-/**
- * `env-only` drops MODEL_CATALOG from the effective catalog so a team can
- * publish an exact menu of models. Built-in entries can still be pulled back
- * in by slug reference from ORCHESTRATE_MODEL_CATALOG or a role env var.
- */
-export function readCatalogMode(): CatalogMode {
-  const raw = readEnvOverride(MODEL_ENV_CATALOG_MODE);
-  if (!raw) return "merge";
-  const normalized = raw.toLowerCase();
-  if (normalized === "merge" || normalized === "env-only") return normalized;
-  throw new ModelConfigError(
-    `${MODEL_ENV_CATALOG_MODE}="${raw}" is not valid. Use "merge" (default) or "env-only".`
-  );
-}
-
 function parseSpeed(value: unknown, ctx: string): ModelProfile["speed"] {
   if (value === undefined) return "medium";
   if (typeof value === "string" && SPEEDS.has(value as ModelProfile["speed"])) {
@@ -308,26 +281,29 @@ function parseStrengths(value: unknown, ctx: string): string[] {
   return value as string[];
 }
 
-function parseDefaultFor(value: unknown, ctx: string): TaskType[] | undefined {
+function parseDefaultFor(
+  value: unknown,
+  ctx: string
+): CatalogRole[] | undefined {
   if (value === undefined) return undefined;
   if (!Array.isArray(value)) {
     throw new ModelConfigError(
-      `${ctx}: "defaultFor" must be an array of ${ALL_TASK_TYPES.join(" | ")}`
+      `${ctx}: "defaultFor" must be an array of ${CATALOG_ROLES.join(" | ")}`
     );
   }
-  const types: TaskType[] = [];
+  const roles: CatalogRole[] = [];
   for (const item of value) {
     if (
       typeof item !== "string" ||
-      !ALL_TASK_TYPES.includes(item as TaskType)
+      !CATALOG_ROLES.includes(item as CatalogRole)
     ) {
       throw new ModelConfigError(
-        `${ctx}: "defaultFor" entries must be one of ${ALL_TASK_TYPES.join(", ")}`
+        `${ctx}: "defaultFor" entries must be one of ${CATALOG_ROLES.join(", ")}`
       );
     }
-    types.push(item as TaskType);
+    roles.push(item as CatalogRole);
   }
-  return types;
+  return roles;
 }
 
 function optionalString(
@@ -342,225 +318,138 @@ function optionalString(
   return value.trim();
 }
 
-/** A parsed env entry: either a reference to an existing slug, or a profile. */
-type CatalogEntryInput =
-  | { kind: "ref"; slug: string; defaultFor?: TaskType[] }
-  | { kind: "profile"; profile: ModelProfile };
-
-function parseEntryObject(
-  raw: Record<string, unknown>,
-  ctx: string
-): CatalogEntryInput {
-  const slug = optionalString(raw.slug, "slug", ctx);
-  const defaultFor = parseDefaultFor(raw.defaultFor, ctx);
-  const hasSelection = raw.selection !== undefined || raw.id !== undefined;
-  if (!hasSelection) {
-    if (!slug) {
-      throw new ModelConfigError(
-        `${ctx}: entry needs "id" (or "selection"), or a "slug" that references a built-in model`
-      );
-    }
-    return { kind: "ref", slug, defaultFor };
-  }
-  const selection = normalizeModelSelection(
-    raw.selection ?? { id: raw.id, params: raw.params },
-    ctx
-  );
-  const label = formatModelSelectionLabel(selection);
-  return {
-    kind: "profile",
-    profile: {
-      slug: slug ?? selection.id,
-      selection,
-      summary:
-        optionalString(raw.summary, "summary", ctx) ??
-        `Operator-configured model (${label}).`,
-      strengths: parseStrengths(raw.strengths, ctx),
-      speed: parseSpeed(raw.speed, ctx),
-      use:
-        optionalString(raw.use, "use", ctx) ??
-        "Configured for this repo via orchestrate model env config. Prefer it unless the task needs a listed specialist.",
-      defaultFor,
-    },
-  };
-}
-
-/** Role env vars accept a slug, a bare model id, or a JSON entry. */
-function parseRoleEnvValue(raw: string, envName: string): CatalogEntryInput {
-  if (looksLikeSelectionJson(raw)) {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(raw);
-    } catch (err) {
-      throw new ModelConfigError(`${envName}: ${errText(err)}`);
-    }
-    if (!isPlainObject(parsed)) {
-      throw new ModelConfigError(`${envName}: expected a JSON object`);
-    }
-    return parseEntryObject(parsed, envName);
-  }
-  return { kind: "ref", slug: raw };
-}
-
 function builtinBySlug(slug: string): ModelProfile | undefined {
   return MODEL_CATALOG.find(m => m.slug === slug);
 }
 
 /**
- * Resolve a slug reference. Role env vars may name a model that isn't in the
- * built-in catalog (`composer-2.5`); it becomes a bare `{ id }` entry.
- * ORCHESTRATE_MODEL_CATALOG refs must name a built-in, since a typo there
- * would silently publish a non-existent model to planners.
+ * Parse one ORCHESTRATE_MODEL_CATALOG entry. An entry with `id` (or
+ * `selection`) defines a model; an entry with only `slug` pulls in the
+ * built-in profile of that name, so operators can list a curated subset
+ * without retyping SDK params.
  */
-function resolveRef(
-  slug: string,
-  ctx: string,
-  synthesizeIfUnknown: boolean
+function parseCatalogEntry(
+  raw: Record<string, unknown>,
+  ctx: string
 ): ModelProfile {
-  const builtin = builtinBySlug(slug);
-  if (builtin) return { ...builtin };
-  if (!synthesizeIfUnknown) {
-    throw new ModelConfigError(
-      `${ctx}: "${slug}" is not a built-in MODEL_CATALOG slug. Give the entry an "id" to define a new model, or use a known slug.`
-    );
+  const slug = optionalString(raw.slug, "slug", ctx);
+  const defaultFor = parseDefaultFor(raw.defaultFor, ctx);
+
+  if (raw.selection === undefined && raw.id === undefined) {
+    if (!slug) {
+      throw new ModelConfigError(
+        `${ctx}: entry needs "id" (or "selection"), or a "slug" that references a built-in model`
+      );
+    }
+    const builtin = builtinBySlug(slug);
+    if (!builtin) {
+      throw new ModelConfigError(
+        `${ctx}: "${slug}" is not a built-in MODEL_CATALOG slug. Give the entry an "id" to define a new model, or use a known slug.`
+      );
+    }
+    return { ...builtin, defaultFor: defaultFor ?? builtin.defaultFor };
   }
+
+  const selection = normalizeModelSelection(
+    raw.selection ?? { id: raw.id, params: raw.params },
+    ctx
+  );
   return {
-    slug,
-    selection: { id: slug },
-    summary: `Operator-configured model (${slug}).`,
-    strengths: [],
-    speed: "medium",
-    use: "Configured for this repo via orchestrate model env config. Prefer it unless the task needs a listed specialist.",
+    slug: slug ?? selection.id,
+    selection,
+    summary:
+      optionalString(raw.summary, "summary", ctx) ??
+      `Operator-configured model (${formatModelSelectionLabel(selection)}).`,
+    strengths: parseStrengths(raw.strengths, ctx),
+    speed: parseSpeed(raw.speed, ctx),
+    use:
+      optionalString(raw.use, "use", ctx) ??
+      "Configured for this repo via ORCHESTRATE_MODEL_CATALOG. Prefer it unless the task needs a listed specialist.",
+    defaultFor,
   };
 }
 
-export interface EffectiveCatalog {
-  mode: CatalogMode;
-  catalog: ModelProfile[];
-  /** Effective role defaults, by slug. Missing when nothing claims the role. */
-  defaults: Partial<Record<TaskType, string>>;
+function readCatalogEnv(): string | undefined {
+  const raw = process.env[MODEL_ENV_CATALOG]?.trim();
+  return raw || undefined;
+}
+
+/** True when this repo publishes its own catalog instead of the built-in one. */
+export function usingEnvCatalog(): boolean {
+  return readCatalogEnv() !== undefined;
 }
 
 /**
- * Merge MODEL_CATALOG with the ORCHESTRATE_MODEL_* env config into the catalog
- * planners actually see. Built per call so env changes apply without reload.
+ * The catalog planners choose from. ORCHESTRATE_MODEL_CATALOG replaces
+ * MODEL_CATALOG outright when set; there is no merging, so the env value is
+ * the complete menu. Built per call so env changes apply without reload.
  */
-export function buildEffectiveCatalog(): EffectiveCatalog {
-  const mode = readCatalogMode();
-  const bySlug = new Map<string, ModelProfile>();
-  const order: string[] = [];
-  const upsert = (profile: ModelProfile): void => {
-    if (!bySlug.has(profile.slug)) order.push(profile.slug);
-    bySlug.set(profile.slug, profile);
-  };
+export function effectiveModelCatalog(): ModelProfile[] {
+  const raw = readCatalogEnv();
+  if (!raw) return MODEL_CATALOG;
 
-  if (mode === "merge") {
-    for (const profile of MODEL_CATALOG) upsert({ ...profile });
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new ModelConfigError(`${MODEL_ENV_CATALOG}: ${errText(err)}`);
   }
-
-  const declared: Partial<Record<TaskType, string>> = {};
-
-  const rawCatalog = readEnvOverride(MODEL_ENV_CATALOG);
-  if (rawCatalog) {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(rawCatalog);
-    } catch (err) {
-      throw new ModelConfigError(`${MODEL_ENV_CATALOG}: ${errText(err)}`);
-    }
-    if (!Array.isArray(parsed)) {
-      throw new ModelConfigError(
-        `${MODEL_ENV_CATALOG}: expected a JSON array of model entries`
-      );
-    }
-    parsed.forEach((item, i) => {
-      const ctx = `${MODEL_ENV_CATALOG}[${i}]`;
-      if (!isPlainObject(item)) {
-        throw new ModelConfigError(`${ctx}: expected a JSON object`);
-      }
-      const entry = parseEntryObject(item, ctx);
-      const profile =
-        entry.kind === "ref"
-          ? {
-              ...resolveRef(entry.slug, ctx, false),
-              defaultFor: entry.defaultFor,
-            }
-          : entry.profile;
-      upsert(profile);
-      for (const type of profile.defaultFor ?? []) {
-        const prior = declared[type];
-        if (prior && prior !== profile.slug) {
-          throw new ModelConfigError(
-            `${MODEL_ENV_CATALOG}: two entries claim the ${type} default ("${prior}" and "${profile.slug}")`
-          );
-        }
-        declared[type] = profile.slug;
-      }
-    });
+  if (!Array.isArray(parsed)) {
+    throw new ModelConfigError(
+      `${MODEL_ENV_CATALOG}: expected a JSON array of model entries`
+    );
   }
-
-  // Role env vars are the most specific signal, so they win over any
-  // defaultFor declared inside ORCHESTRATE_MODEL_CATALOG.
-  for (const type of ALL_TASK_TYPES) {
-    const envName = MODEL_ENV_BY_TYPE[type];
-    const raw = readEnvOverride(envName);
-    if (!raw) continue;
-    const entry = parseRoleEnvValue(raw, envName);
-    const profile =
-      entry.kind === "ref"
-        ? resolveRef(entry.slug, envName, true)
-        : entry.profile;
-    const existing = bySlug.get(profile.slug);
-    upsert(entry.kind === "ref" && existing ? existing : profile);
-    declared[type] = profile.slug;
-  }
-
-  // Inherit unclaimed roles from whatever remains in the catalog.
-  for (const type of ALL_TASK_TYPES) {
-    if (declared[type]) continue;
-    const inherited = order
-      .map(slug => bySlug.get(slug))
-      .find(profile => profile?.defaultFor?.includes(type));
-    if (inherited) declared[type] = inherited.slug;
-  }
-
-  // Re-stamp defaultFor so rendering reflects the resolved defaults.
-  const rolesBySlug = new Map<string, TaskType[]>();
-  for (const type of ALL_TASK_TYPES) {
-    const slug = declared[type];
-    if (!slug) continue;
-    const roles = rolesBySlug.get(slug) ?? [];
-    roles.push(type);
-    rolesBySlug.set(slug, roles);
+  if (!parsed.length) {
+    throw new ModelConfigError(
+      `${MODEL_ENV_CATALOG}: needs at least one entry. Unset it to use the built-in catalog.`
+    );
   }
 
   const catalog: ModelProfile[] = [];
-  for (const slug of order) {
-    const profile = bySlug.get(slug);
-    if (!profile) continue;
-    const roles = rolesBySlug.get(slug);
-    catalog.push({ ...profile, defaultFor: roles?.length ? roles : undefined });
-  }
+  const bySlug = new Map<string, number>();
+  const claimedBy = new Map<CatalogRole, string>();
 
-  return { mode, catalog, defaults: declared };
+  parsed.forEach((item, i) => {
+    const ctx = `${MODEL_ENV_CATALOG}[${i}]`;
+    if (!isPlainObject(item)) {
+      throw new ModelConfigError(`${ctx}: expected a JSON object`);
+    }
+    const profile = parseCatalogEntry(item, ctx);
+
+    const priorIndex = bySlug.get(profile.slug);
+    if (priorIndex !== undefined) {
+      throw new ModelConfigError(
+        `${ctx}: duplicate slug "${profile.slug}" (also at index ${priorIndex})`
+      );
+    }
+    bySlug.set(profile.slug, i);
+
+    for (const role of profile.defaultFor ?? []) {
+      const prior = claimedBy.get(role);
+      if (prior) {
+        throw new ModelConfigError(
+          `${MODEL_ENV_CATALOG}: two entries claim the ${role} default ("${prior}" and "${profile.slug}")`
+        );
+      }
+      claimedBy.set(role, profile.slug);
+    }
+    catalog.push(profile);
+  });
+
+  return catalog;
 }
 
-/** The catalog planners see: MODEL_CATALOG plus/minus the env config. */
-export function effectiveModelCatalog(): ModelProfile[] {
-  return buildEffectiveCatalog().catalog;
+function defaultSlugForRole(role: CatalogRole): string | undefined {
+  return effectiveModelCatalog().find(m => m.defaultFor?.includes(role))?.slug;
 }
 
-/**
- * Fallback model slug when `tasks[].model` is omitted. Resolves against the
- * effective catalog, so env config participates.
- */
+/** Model slug for a task type when `tasks[].model` is omitted. */
 export function defaultModelForType(type: TaskType): string {
-  const { defaults, mode } = buildEffectiveCatalog();
-  const slug = defaults[type];
+  const slug = defaultSlugForRole(type);
   if (slug) return slug;
-  if (mode === "env-only") {
+  if (usingEnvCatalog()) {
     throw new ModelConfigError(
-      `no ${type} default: ${MODEL_ENV_CATALOG_MODE}=env-only drops MODEL_CATALOG, so set ${MODEL_ENV_BY_TYPE[type]} or give an ${MODEL_ENV_CATALOG} entry "defaultFor": ["${type}"]`
+      `${MODEL_ENV_CATALOG} has no ${type} default. Add "defaultFor": ["${type}"] to one entry.`
     );
   }
   throw new ModelConfigError(
@@ -568,9 +457,12 @@ export function defaultModelForType(type: TaskType): string {
   );
 }
 
-/** Kickoff `--model` default: ORCHESTRATE_MODEL_ROOT, else the built-in root model. */
+/**
+ * Kickoff `--model` default. Honors a `defaultFor: ["root"]` catalog entry,
+ * else falls back to the built-in root model.
+ */
 export function defaultRootModel(): string {
-  return readEnvOverride(MODEL_ENV_ROOT) ?? DEFAULT_ROOT_MODEL;
+  return defaultSlugForRole("root") ?? DEFAULT_ROOT_MODEL;
 }
 
 export function isKnownModel(slug: string): boolean {
@@ -594,41 +486,38 @@ export function resolveModelSelection(spec: string): ModelSelection {
   return profile ? profile.selection : { id: trimmed };
 }
 
-/** Effective default label per task type (catalog entry or env override). */
-export function effectiveDefaultLabelForType(type: TaskType): string {
-  return defaultModelForType(type);
-}
-
 /**
- * Fail fast on unusable ORCHESTRATE_MODEL_* config instead of surfacing it as
- * a spawn error halfway through a run.
+ * Fail fast on unusable catalog config instead of surfacing it as a spawn
+ * error halfway through a run.
  */
 export function assertModelEnvConfig(): void {
-  const { defaults, mode } = buildEffectiveCatalog();
-  if (mode !== "env-only") return;
-  const missing = ALL_TASK_TYPES.filter(type => !defaults[type]);
+  if (!usingEnvCatalog()) return;
+  const catalog = effectiveModelCatalog();
+  const missing = REQUIRED_ROLES.filter(
+    role => !catalog.some(m => m.defaultFor?.includes(role))
+  );
   if (!missing.length) return;
   throw new ModelConfigError(
-    `${MODEL_ENV_CATALOG_MODE}=env-only leaves no default for ${missing.join(", ")}. Set ${missing
-      .map(type => MODEL_ENV_BY_TYPE[type])
-      .join(", ")}, or add "defaultFor" to an ${MODEL_ENV_CATALOG} entry.`
+    `${MODEL_ENV_CATALOG} has no default for ${missing.join(", ")}. Add "defaultFor": [${missing
+      .map(role => `"${role}"`)
+      .join(", ")}] across your entries.`
   );
 }
 
 export function renderModelCatalog(): string {
-  const { catalog, mode } = buildEffectiveCatalog();
+  const catalog = effectiveModelCatalog();
   const lines: string[] = [];
-  if (mode === "env-only") {
+  if (usingEnvCatalog()) {
     lines.push(
       "This repo publishes an exact model menu. Use only the slugs listed below; do not reach for models outside this list."
     );
     lines.push("");
   }
   for (const m of catalog) {
-    const defaults = m.defaultFor?.length
+    const roles = m.defaultFor?.length
       ? ` (default for ${m.defaultFor.join(", ")})`
       : "";
-    lines.push(`- \`${m.slug}\` — ${m.summary}${defaults}`);
+    lines.push(`- \`${m.slug}\` — ${m.summary}${roles}`);
     const strengths = m.strengths.length
       ? `; strengths: ${m.strengths.join(", ")}`
       : "";

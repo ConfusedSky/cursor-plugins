@@ -2,115 +2,202 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
 import {
   assertModelEnvConfig,
-  buildEffectiveCatalog,
   DEFAULT_ROOT_MODEL,
   defaultModelForType,
   defaultRootModel,
   effectiveModelCatalog,
   formatModelSelectionLabel,
   isKnownModel,
-  MODEL_ENV_BY_TYPE,
   MODEL_ENV_CATALOG,
-  MODEL_ENV_CATALOG_MODE,
-  MODEL_ENV_ROOT,
   ModelConfigError,
   parseModelSelectionJson,
   renderModelCatalog,
   resolveModelSelection,
+  usingEnvCatalog,
 } from "../models.ts";
 
-const ENV_KEYS = [
-  MODEL_ENV_BY_TYPE.worker,
-  MODEL_ENV_BY_TYPE.subplanner,
-  MODEL_ENV_BY_TYPE.verifier,
-  MODEL_ENV_ROOT,
-  MODEL_ENV_CATALOG,
-  MODEL_ENV_CATALOG_MODE,
-] as const;
+let saved: string | undefined;
 
-const savedEnv: Record<string, string | undefined> = {};
+function setCatalog(entries: unknown): void {
+  process.env[MODEL_ENV_CATALOG] = JSON.stringify(entries);
+}
 
 beforeEach(() => {
-  for (const key of ENV_KEYS) {
-    savedEnv[key] = process.env[key];
-    delete process.env[key];
-  }
+  saved = process.env[MODEL_ENV_CATALOG];
+  delete process.env[MODEL_ENV_CATALOG];
 });
 
 afterEach(() => {
-  for (const key of ENV_KEYS) {
-    const prior = savedEnv[key];
-    if (prior === undefined) delete process.env[key];
-    else process.env[key] = prior;
-  }
+  if (saved === undefined) delete process.env[MODEL_ENV_CATALOG];
+  else process.env[MODEL_ENV_CATALOG] = saved;
 });
 
-describe("per-role env overrides", () => {
-  test("catalog defaults apply when env is unset", () => {
+describe("built-in catalog (ORCHESTRATE_MODEL_CATALOG unset)", () => {
+  test("role defaults come from MODEL_CATALOG", () => {
+    expect(usingEnvCatalog()).toBe(false);
     expect(defaultModelForType("worker")).toBe("gpt-5.5-high-fast");
     expect(defaultModelForType("subplanner")).toBe(
       "claude-opus-4-8-thinking-xhigh"
     );
     expect(defaultModelForType("verifier")).toBe("claude-opus-4-8");
+    expect(defaultRootModel()).toBe(DEFAULT_ROOT_MODEL);
   });
 
-  test("catalog slug in env overrides defaultFor", () => {
-    process.env.ORCHESTRATE_MODEL_WORKER = "composer-2-fast";
-    expect(defaultModelForType("worker")).toBe("composer-2-fast");
+  test("whitespace-only value is treated as unset", () => {
+    process.env[MODEL_ENV_CATALOG] = "   ";
+    expect(usingEnvCatalog()).toBe(false);
+    expect(defaultModelForType("worker")).toBe("gpt-5.5-high-fast");
+  });
+
+  test("rendered catalog has no exact-menu preamble", () => {
+    expect(renderModelCatalog()).not.toContain("exact model menu");
+  });
+});
+
+describe("ORCHESTRATE_MODEL_CATALOG replaces the built-in catalog", () => {
+  test("only the listed models are published", () => {
+    setCatalog([
+      { id: "composer-2.5", summary: "Cheap worker.", defaultFor: ["worker"] },
+      { slug: "claude-opus-4-8", defaultFor: ["subplanner", "verifier"] },
+    ]);
+    expect(usingEnvCatalog()).toBe(true);
+    expect(effectiveModelCatalog().map(m => m.slug)).toEqual([
+      "composer-2.5",
+      "claude-opus-4-8",
+    ]);
+    expect(isKnownModel("gpt-5.5-high-fast")).toBe(false);
+    expect(isKnownModel("composer-2.5")).toBe(true);
+  });
+
+  test("entries define role defaults", () => {
+    setCatalog([
+      { id: "composer-2.5", defaultFor: ["worker"] },
+      { slug: "claude-opus-4-8", defaultFor: ["subplanner", "verifier"] },
+    ]);
+    expect(defaultModelForType("worker")).toBe("composer-2.5");
+    expect(defaultModelForType("subplanner")).toBe("claude-opus-4-8");
+    expect(defaultModelForType("verifier")).toBe("claude-opus-4-8");
+  });
+
+  test("slug-only entry pulls in a built-in with its params", () => {
+    setCatalog([{ slug: "composer-2-fast", defaultFor: ["worker"] }]);
     expect(resolveModelSelection("composer-2-fast")).toEqual({
       id: "composer-2",
       params: [{ id: "fast", value: "true" }],
     });
-    expect(defaultModelForType("verifier")).toBe("claude-opus-4-8");
+    expect(defaultModelForType("worker")).toBe("composer-2-fast");
   });
 
-  test("whitespace-only env is treated as unset", () => {
-    process.env.ORCHESTRATE_MODEL_WORKER = "   ";
-    expect(defaultModelForType("worker")).toBe("gpt-5.5-high-fast");
-  });
-
-  test("bare unknown id joins the catalog and round-trips", () => {
-    process.env.ORCHESTRATE_MODEL_WORKER = "composer-2.5";
-    expect(defaultModelForType("worker")).toBe("composer-2.5");
-    // Merged in, so a planner copying the slug resolves back to the same model.
-    expect(isKnownModel("composer-2.5")).toBe(true);
-    expect(resolveModelSelection("composer-2.5")).toEqual({
-      id: "composer-2.5",
-    });
-  });
-
-  test("JSON entry keeps params and gets a slug", () => {
-    process.env.ORCHESTRATE_MODEL_WORKER =
-      '{"id":"composer-2.5","params":[{"id":"fast","value":"true"}]}';
-    const slug = defaultModelForType("worker");
-    expect(slug).toBe("composer-2.5");
-    expect(resolveModelSelection(slug)).toEqual({
-      id: "composer-2.5",
-      params: [{ id: "fast", value: "true" }],
-    });
-  });
-
-  test("JSON entry can name its own slug and prose", () => {
-    process.env.ORCHESTRATE_MODEL_WORKER = JSON.stringify({
-      slug: "composer-cheap",
-      id: "composer-2.5",
-      params: [{ id: "fast", value: "true" }],
-      summary: "House worker model.",
-      use: "Use for all bounded implementation work.",
-      speed: "fast",
-      strengths: ["throughput"],
-    });
-    expect(defaultModelForType("worker")).toBe("composer-cheap");
-    expect(resolveModelSelection("composer-cheap")).toEqual({
+  test("entry keeps params and round-trips by slug", () => {
+    setCatalog([
+      {
+        slug: "house-worker",
+        id: "composer-2.5",
+        params: [{ id: "fast", value: "true" }],
+        summary: "House worker model.",
+        use: "Use for all bounded implementation work.",
+        speed: "fast",
+        strengths: ["throughput"],
+        defaultFor: ["worker"],
+      },
+    ]);
+    expect(resolveModelSelection("house-worker")).toEqual({
       id: "composer-2.5",
       params: [{ id: "fast", value: "true" }],
     });
     const text = renderModelCatalog();
-    expect(text).toContain("`composer-cheap` — House worker model.");
+    expect(text).toContain("exact model menu");
+    expect(text).toContain("`house-worker` — House worker model.");
     expect(text).toContain("(default for worker)");
     expect(text).toContain("speed: fast; strengths: throughput");
   });
 
+  test("slug defaults to the model id and prose is synthesized", () => {
+    setCatalog([{ id: "composer-2.5", defaultFor: ["worker"] }]);
+    const [entry] = effectiveModelCatalog();
+    expect(entry.slug).toBe("composer-2.5");
+    expect(entry.summary).toContain("composer-2.5");
+    expect(entry.speed).toBe("medium");
+  });
+
+  test("root default is configurable, else falls back", () => {
+    setCatalog([{ id: "composer-2.5", defaultFor: ["worker"] }]);
+    expect(defaultRootModel()).toBe(DEFAULT_ROOT_MODEL);
+    setCatalog([
+      { id: "composer-2.5", defaultFor: ["worker"] },
+      { slug: "claude-opus-4-8", defaultFor: ["root"] },
+    ]);
+    expect(defaultRootModel()).toBe("claude-opus-4-8");
+  });
+});
+
+describe("catalog config errors", () => {
+  test("missing required role fails fast with an actionable message", () => {
+    setCatalog([{ id: "composer-2.5", defaultFor: ["worker"] }]);
+    expect(() => assertModelEnvConfig()).toThrow(ModelConfigError);
+    expect(() => assertModelEnvConfig()).toThrow(
+      /no default for subplanner, verifier/
+    );
+    expect(() => defaultModelForType("verifier")).toThrow(
+      /"defaultFor": \["verifier"\]/
+    );
+  });
+
+  test("assertModelEnvConfig passes when every role resolves", () => {
+    setCatalog([
+      { id: "composer-2.5", defaultFor: ["worker"] },
+      { slug: "claude-opus-4-8", defaultFor: ["subplanner", "verifier"] },
+    ]);
+    expect(() => assertModelEnvConfig()).not.toThrow();
+  });
+
+  test("non-array, empty, and malformed JSON are rejected", () => {
+    process.env[MODEL_ENV_CATALOG] = '{"id":"x"}';
+    expect(() => effectiveModelCatalog()).toThrow(/expected a JSON array/);
+
+    setCatalog([]);
+    expect(() => effectiveModelCatalog()).toThrow(/at least one entry/);
+
+    process.env[MODEL_ENV_CATALOG] = "[{id:}]";
+    expect(() => effectiveModelCatalog()).toThrow(ModelConfigError);
+  });
+
+  test("unknown slug reference is rejected", () => {
+    setCatalog([{ slug: "not-a-builtin" }]);
+    expect(() => effectiveModelCatalog()).toThrow(
+      /not a built-in MODEL_CATALOG slug/
+    );
+  });
+
+  test("duplicate slugs are rejected", () => {
+    setCatalog([{ id: "composer-2.5" }, { id: "composer-2.5" }]);
+    expect(() => effectiveModelCatalog()).toThrow(/duplicate slug/);
+  });
+
+  test("two entries claiming one role is rejected", () => {
+    setCatalog([
+      { id: "composer-2.5", defaultFor: ["worker"] },
+      { id: "grok-4-5", defaultFor: ["worker"] },
+    ]);
+    expect(() => effectiveModelCatalog()).toThrow(/claim the worker default/);
+  });
+
+  test("bad field values are rejected", () => {
+    setCatalog([{ id: "x", speed: "blistering" }]);
+    expect(() => effectiveModelCatalog()).toThrow(/"speed" must be/);
+
+    setCatalog([{ id: "x", defaultFor: ["planner"] }]);
+    expect(() => effectiveModelCatalog()).toThrow(/"defaultFor" entries/);
+
+    setCatalog([{ id: "x", strengths: "fast" }]);
+    expect(() => effectiveModelCatalog()).toThrow(/"strengths" must be/);
+
+    setCatalog([{ summary: "no id or slug" }]);
+    expect(() => effectiveModelCatalog()).toThrow(/entry needs "id"/);
+  });
+});
+
+describe("selection parsing", () => {
   test("invalid JSON selection throws a clear error", () => {
     expect(() => parseModelSelectionJson("{not-json")).toThrow(
       /invalid model selection JSON/
@@ -123,27 +210,15 @@ describe("per-role env overrides", () => {
     ).toThrow(/each params entry/);
   });
 
-  test("defaultRootModel reads ORCHESTRATE_MODEL_ROOT", () => {
-    expect(defaultRootModel()).toBe(DEFAULT_ROOT_MODEL);
-    process.env.ORCHESTRATE_MODEL_ROOT = "composer-2-fast";
-    expect(defaultRootModel()).toBe("composer-2-fast");
-    process.env.ORCHESTRATE_MODEL_ROOT = '{"id":"composer-2.5"}';
-    expect(resolveModelSelection(defaultRootModel())).toEqual({
+  test("JSON selection passes through resolveModelSelection", () => {
+    expect(
+      resolveModelSelection(
+        '{"id":"composer-2.5","params":[{"id":"fast","value":"true"}]}'
+      )
+    ).toEqual({
       id: "composer-2.5",
+      params: [{ id: "fast", value: "true" }],
     });
-  });
-
-  test("rendered catalog moves the default label to the override", () => {
-    process.env.ORCHESTRATE_MODEL_WORKER = "composer-2-fast";
-    const text = renderModelCatalog();
-    const composerLine = text
-      .split("\n")
-      .find(l => l.includes("`composer-2-fast`"));
-    const gptLine = text
-      .split("\n")
-      .find(l => l.includes("`gpt-5.5-high-fast`"));
-    expect(composerLine).toContain("(default for worker)");
-    expect(gptLine).not.toContain("default for worker");
   });
 
   test("formatModelSelectionLabel renders params", () => {
@@ -153,144 +228,5 @@ describe("per-role env overrides", () => {
         params: [{ id: "fast", value: "true" }],
       })
     ).toBe("composer-2.5 (fast=true)");
-  });
-});
-
-describe("ORCHESTRATE_MODEL_CATALOG", () => {
-  test("adds entries alongside the built-in catalog", () => {
-    process.env.ORCHESTRATE_MODEL_CATALOG = JSON.stringify([
-      { id: "composer-2.5", summary: "Cheap worker." },
-    ]);
-    const slugs = effectiveModelCatalog().map(m => m.slug);
-    expect(slugs).toContain("composer-2.5");
-    expect(slugs).toContain("gpt-5.5-high-fast");
-  });
-
-  test("entry defaultFor claims a role", () => {
-    process.env.ORCHESTRATE_MODEL_CATALOG = JSON.stringify([
-      { id: "composer-2.5", defaultFor: ["worker"] },
-    ]);
-    expect(defaultModelForType("worker")).toBe("composer-2.5");
-  });
-
-  test("role env var wins over an entry defaultFor", () => {
-    process.env.ORCHESTRATE_MODEL_CATALOG = JSON.stringify([
-      { id: "composer-2.5", defaultFor: ["worker"] },
-    ]);
-    process.env.ORCHESTRATE_MODEL_WORKER = "composer-2-fast";
-    expect(defaultModelForType("worker")).toBe("composer-2-fast");
-  });
-
-  test("two entries claiming one role is a config error", () => {
-    process.env.ORCHESTRATE_MODEL_CATALOG = JSON.stringify([
-      { id: "composer-2.5", defaultFor: ["worker"] },
-      { id: "grok-4-5", defaultFor: ["worker"] },
-    ]);
-    expect(() => buildEffectiveCatalog()).toThrow(/claim the worker default/);
-  });
-
-  test("entry can override a built-in slug's selection", () => {
-    process.env.ORCHESTRATE_MODEL_CATALOG = JSON.stringify([
-      { slug: "composer-2-fast", id: "composer-2.5" },
-    ]);
-    expect(resolveModelSelection("composer-2-fast")).toEqual({
-      id: "composer-2.5",
-    });
-  });
-
-  test("slug-only entry referencing an unknown model is rejected", () => {
-    process.env.ORCHESTRATE_MODEL_CATALOG = JSON.stringify([
-      { slug: "not-a-builtin" },
-    ]);
-    expect(() => buildEffectiveCatalog()).toThrow(
-      /not a built-in MODEL_CATALOG slug/
-    );
-  });
-
-  test("malformed config surfaces as ModelConfigError", () => {
-    process.env.ORCHESTRATE_MODEL_CATALOG = '{"id":"x"}';
-    expect(() => buildEffectiveCatalog()).toThrow(ModelConfigError);
-    expect(() => buildEffectiveCatalog()).toThrow(/expected a JSON array/);
-
-    process.env.ORCHESTRATE_MODEL_CATALOG = JSON.stringify([
-      { id: "x", speed: "blistering" },
-    ]);
-    expect(() => buildEffectiveCatalog()).toThrow(/"speed" must be/);
-
-    process.env.ORCHESTRATE_MODEL_CATALOG = JSON.stringify([
-      { id: "x", defaultFor: ["planner"] },
-    ]);
-    expect(() => buildEffectiveCatalog()).toThrow(/"defaultFor" entries/);
-  });
-});
-
-describe("ORCHESTRATE_MODEL_CATALOG_MODE=env-only", () => {
-  test("drops built-ins so only listed models are published", () => {
-    process.env.ORCHESTRATE_MODEL_CATALOG_MODE = "env-only";
-    process.env.ORCHESTRATE_MODEL_CATALOG = JSON.stringify([
-      { id: "composer-2.5", defaultFor: ["worker"] },
-      { slug: "claude-opus-4-8", defaultFor: ["subplanner", "verifier"] },
-    ]);
-    const slugs = effectiveModelCatalog().map(m => m.slug);
-    expect(slugs).toEqual(["composer-2.5", "claude-opus-4-8"]);
-    expect(slugs).not.toContain("gpt-5.5-high-fast");
-    expect(isKnownModel("gpt-5.5-high-fast")).toBe(false);
-  });
-
-  test("slug reference pulls a built-in back in with its params", () => {
-    process.env.ORCHESTRATE_MODEL_CATALOG_MODE = "env-only";
-    process.env.ORCHESTRATE_MODEL_CATALOG = JSON.stringify([
-      { slug: "composer-2-fast", defaultFor: ["worker"] },
-    ]);
-    process.env.ORCHESTRATE_MODEL_SUBPLANNER = "claude-opus-4-8";
-    process.env.ORCHESTRATE_MODEL_VERIFIER = "claude-opus-4-8";
-    expect(resolveModelSelection("composer-2-fast")).toEqual({
-      id: "composer-2",
-      params: [{ id: "fast", value: "true" }],
-    });
-    expect(defaultModelForType("worker")).toBe("composer-2-fast");
-    expect(defaultModelForType("subplanner")).toBe("claude-opus-4-8");
-  });
-
-  test("rendered catalog tells planners the menu is exact", () => {
-    process.env.ORCHESTRATE_MODEL_CATALOG_MODE = "env-only";
-    process.env.ORCHESTRATE_MODEL_CATALOG = JSON.stringify([
-      { id: "composer-2.5", defaultFor: ["worker", "subplanner", "verifier"] },
-    ]);
-    const text = renderModelCatalog();
-    expect(text).toContain("exact model menu");
-    expect(text).not.toContain("gpt-5.5-high-fast");
-  });
-
-  test("missing role default fails fast with an actionable message", () => {
-    process.env.ORCHESTRATE_MODEL_CATALOG_MODE = "env-only";
-    process.env.ORCHESTRATE_MODEL_WORKER = "composer-2.5";
-    expect(() => assertModelEnvConfig()).toThrow(ModelConfigError);
-    expect(() => assertModelEnvConfig()).toThrow(
-      /leaves no default for subplanner, verifier/
-    );
-    expect(() => defaultModelForType("verifier")).toThrow(
-      /ORCHESTRATE_MODEL_VERIFIER/
-    );
-  });
-
-  test("assertModelEnvConfig passes when every role resolves", () => {
-    process.env.ORCHESTRATE_MODEL_CATALOG_MODE = "env-only";
-    process.env.ORCHESTRATE_MODEL_WORKER = "composer-2.5";
-    process.env.ORCHESTRATE_MODEL_SUBPLANNER = "claude-opus-4-8";
-    process.env.ORCHESTRATE_MODEL_VERIFIER = "claude-opus-4-8";
-    expect(() => assertModelEnvConfig()).not.toThrow();
-  });
-
-  test("unknown mode value is rejected", () => {
-    process.env.ORCHESTRATE_MODEL_CATALOG_MODE = "exclusive";
-    expect(() => buildEffectiveCatalog()).toThrow(/is not valid/);
-  });
-
-  test("merge mode is the default and keeps built-ins", () => {
-    expect(buildEffectiveCatalog().mode).toBe("merge");
-    expect(effectiveModelCatalog().map(m => m.slug)).toContain(
-      "gpt-5.5-high-fast"
-    );
   });
 });
