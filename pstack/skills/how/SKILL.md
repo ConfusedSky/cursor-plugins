@@ -32,6 +32,8 @@ Identify the scope. If ambiguous, state your best-guess interpretation before ex
 
 When in doubt, lean simple. You can always spawn explorers if the explainer hits a wall.
 
+If you cannot spawn subagents, or a spawned explorer never returns, run the exploration angles yourself sequentially and keep going. The angles are the point, not the parallelism. Never end your turn waiting on explorers.
+
 ### Step 2a. Explore (complex questions only)
 
 Decompose the question into 2-4 parallel exploration angles, each a distinct slice of the subsystem so explorers don't duplicate work. Example split for "how does the rate limiter work?":
