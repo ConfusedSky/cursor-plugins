@@ -242,7 +242,7 @@ const PlanObjectSchema = z
     slackChannel: nonEmptyStringSchema
       .optional()
       .describe(
-        "Slack channel id for run visibility. Set from --slack-channel or SLACK_CHANNEL_ID by kickoff or the first root run."
+        "Slack channel id for run visibility. Set from --slack-channel or ORCHESTRATE_SLACK_CHANNEL_ID by kickoff or the first root run."
       ),
     slackKickoffRef: z
       .object({

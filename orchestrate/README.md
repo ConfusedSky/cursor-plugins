@@ -77,6 +77,8 @@ Team service-account keys (Team Settings → Service accounts) also work for bot
 
 Slack visibility is opt-in. When the token is unset, the script logs once and runs without Slack; correctness does not change. To enable it:
 
+> **Renamed:** these were `SLACK_BOT_TOKEN` and `SLACK_CHANNEL_ID`. They are now `ORCHESTRATE_SLACK_BOT_TOKEN` and `ORCHESTRATE_SLACK_CHANNEL_ID` so orchestrate can't pick up another tool's Slack app from a shared environment. The unprefixed names are no longer read; if only the old token is set, the CLI says so instead of going quiet.
+
 1. Create a Slack app at [https://api.slack.com/apps](https://api.slack.com/apps) → **From scratch**. Pick a name and a workspace.
 2. Under **OAuth & Permissions** → **Bot Token Scopes**, add:
 
@@ -97,9 +99,9 @@ Slack visibility is opt-in. When the token is unset, the script logs once and ru
    | `users:read.email` | Resolve the dispatcher's first name from `git config user.email`. Without it, pass `--dispatcher-name` explicitly. |
 
 3. **Install to Workspace** and copy the **Bot User OAuth Token** (`xoxb-...`).
-4. Export it: `export SLACK_BOT_TOKEN="xoxb-..."`.
+4. Export it: `export ORCHESTRATE_SLACK_BOT_TOKEN="xoxb-..."`.
 5. Invite the bot to the channel where you want runs to thread (`/invite @your-bot`). Public channels with `chat:write.public` skip this; private channels require the invite.
-6. Grab the channel ID. In Slack: right-click the channel → **View channel details** → bottom of the dialog. Pass it via `--slack-channel <id>` on `kickoff` (or set `SLACK_CHANNEL_ID`). The first kickoff persists the id on the plan; subplanners and later `run` invocations inherit it.
+6. Grab the channel ID. In Slack: right-click the channel → **View channel details** → bottom of the dialog. Pass it via `--slack-channel <id>` on `kickoff` (or set `ORCHESTRATE_SLACK_CHANNEL_ID`). The first kickoff persists the id on the plan; subplanners and later `run` invocations inherit it.
 
 ## Install
 
