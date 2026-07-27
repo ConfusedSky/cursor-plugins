@@ -4,7 +4,7 @@ import type { CursorAgentError as CursorAgentErrorValue } from "@cursor/sdk";
 import type { Command } from "commander";
 import { createSlackAdapter } from "../adapters/index.ts";
 import { DEFAULT_MAX_RUNTIME_SEC, runOrchestrateLoop } from "../core/loop.ts";
-import { defaultRootModel, resolveModelSelection } from "../models.ts";
+import { resolveModelSelection } from "../models.ts";
 import {
   parsePlanTaskJson,
   parsePlanTaskValue,
@@ -108,11 +108,7 @@ export function registerTaskCommands(program: Command): void {
     .argument("<goal>", "Root orchestration goal")
     .option("--repo <url>", "Repository URL to orchestrate")
     .option("--ref <ref>", "Starting git ref for the cloud workspace", "main")
-    .option(
-      "--model <id>",
-      'Model id for the root planner (catalog slug, bare id, or JSON ModelSelection). Defaults to the catalog entry marked defaultFor ["root"], else claude-opus-4-8.',
-      defaultRootModel()
-    )
+    .option("--model <id>", "Model id for the root planner", "claude-opus-4-8")
     .option(
       "--force",
       "Spawn a new root planner even when a recent matching run exists."

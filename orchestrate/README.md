@@ -17,7 +17,7 @@ The skill itself lives in [`skills/orchestrate/SKILL.md`](./skills/orchestrate/S
 ```bash
 export ORCHESTRATE_MODEL_CATALOG='[
   {"id":"composer-2.5","summary":"Cheap, fast worker.","defaultFor":["worker"]},
-  {"slug":"claude-opus-4-8","defaultFor":["subplanner","verifier","root"]}
+  {"slug":"claude-opus-4-8","defaultFor":["subplanner","verifier"]}
 ]'
 ```
 
@@ -28,7 +28,7 @@ An entry either **defines** a model or **references** a built-in one:
 - `"id"` (plus optional `"params"`) defines a model. `"slug"` names it for `tasks[].model`, defaulting to the id.
 - `"slug"` alone pulls in the built-in profile of that name, so you can curate a subset without retyping SDK params. Run `bun cli.ts models` with the variable unset to see the built-in slugs.
 
-`"defaultFor"` claims roles: `worker`, `subplanner`, `verifier`, and `root` (the kickoff planner, i.e. the `--model` default). Every role except `root` needs a default somewhere in the list.
+`"defaultFor"` claims task types, and each of `worker`, `subplanner`, and `verifier` needs a default somewhere in the list. Root planners are not part of the catalog; they take their model from kickoff `--model`, which defaults to `claude-opus-4-8`.
 
 Optional prose fields are worth filling in, because planners choose by capability, not by name:
 
@@ -51,9 +51,9 @@ export ORCHESTRATE_MODEL_CATALOG='[
 ### Precedence
 
 1. Explicit `tasks[].model` in the plan
-2. The `defaultFor` entry for that task's role
+2. The `defaultFor` entry for that task's type
 
-Run `bun cli.ts models` to print the effective catalog, and `bun cli.ts models --check` to probe every entry against `/v1/agents`. Malformed config (bad JSON, unknown slug reference, duplicate slug, two entries claiming one role, missing role default) exits 2 at startup with the offending index named, rather than failing mid-run.
+Run `bun cli.ts models` to print the effective catalog, and `bun cli.ts models --check` to probe every entry against `/v1/agents`. Config the CLI can't read as a catalog (bad JSON, not an array, an entry with neither `id` nor a known built-in `slug`, no default for a task type) exits 2 at startup with the offending index named, rather than failing mid-run. Descriptive fields like `speed` and `strengths` are passed through as written rather than checked against a fixed vocabulary, so a wrong value shows up in the rendered catalog instead of blocking the run.
 
 Two caveats. This shapes what planners choose from, but a planner can still write any model id into `tasks[].model`, so it is guidance rather than a spend ceiling. And each spawned agent reads its own environment: set the variable as a Cursor Cloud secret for the repo so subplanners and workers inherit it, not just in the dispatcher's local shell.
 
