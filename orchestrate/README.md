@@ -10,6 +10,29 @@ The skill itself lives in [`skills/orchestrate/SKILL.md`](./skills/orchestrate/S
 - A Cursor API key in `CURSOR_API_KEY`.
 - Optional Slack app and bot token if you want a Slack thread mirroring the run.
 
+## Model defaults (optional)
+
+When a task omits `tasks[].model`, orchestrate picks a catalog default per role. Override those with env vars (useful for cost-efficient pairings without editing the plugin):
+
+| Env var | Role | Example |
+| --- | --- | --- |
+| `ORCHESTRATE_MODEL_WORKER` | worker fallback | `composer-2-fast` |
+| `ORCHESTRATE_MODEL_SUBPLANNER` | subplanner fallback | `claude-opus-4-8` |
+| `ORCHESTRATE_MODEL_VERIFIER` | verifier fallback | `claude-opus-4-8` |
+| `ORCHESTRATE_MODEL_ROOT` | kickoff `--model` default | `claude-opus-4-8` |
+
+Each value may be:
+
+1. A catalog slug (e.g. `composer-2-fast`) — resolved with the catalog's SDK params.
+2. A bare model id (e.g. `composer-2.5`) — sent as `{ id }` (may fail if the backend needs params).
+3. A JSON `ModelSelection` for models not in the catalog yet:
+
+```bash
+export ORCHESTRATE_MODEL_WORKER='{"id":"composer-2.5","params":[{"id":"fast","value":"true"}]}'
+```
+
+Explicit `tasks[].model` in the plan always wins over these env defaults. Run `bun cli.ts models` to see the catalog with env overrides applied.
+
 ## Cursor API key
 
 1. Open [https://cursor.com/dashboard/integrations](https://cursor.com/dashboard/integrations).

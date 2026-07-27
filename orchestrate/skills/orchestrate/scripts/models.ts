@@ -3,7 +3,8 @@ import type { ModelSelection } from "@cursor/sdk";
 import type { TaskType } from "./adapters/types.ts";
 
 // Model catalog. Source of truth for `tasks[].model` choices; `defaultFor`
-// entries supply the fallback when `tasks[].model` is omitted.
+// entries supply the fallback when `tasks[].model` is omitted. Per-role env
+// vars (see MODEL_ENV_BY_TYPE) override those catalog defaults at runtime.
 
 export interface ModelProfile {
   /** User-facing slug for `tasks[].model` and `--model` flags. */
@@ -17,6 +18,18 @@ export interface ModelProfile {
   /** Task types this profile is the default for. */
   defaultFor?: TaskType[];
 }
+
+/** Env vars that override catalog `defaultFor` when set (non-empty). */
+export const MODEL_ENV_BY_TYPE: Record<TaskType, string> = {
+  worker: "ORCHESTRATE_MODEL_WORKER",
+  subplanner: "ORCHESTRATE_MODEL_SUBPLANNER",
+  verifier: "ORCHESTRATE_MODEL_VERIFIER",
+};
+
+/** Env var that overrides the kickoff `--model` default for the root planner. */
+export const MODEL_ENV_ROOT = "ORCHESTRATE_MODEL_ROOT";
+
+export const DEFAULT_ROOT_MODEL = "claude-opus-4-8";
 
 // `slug` is the stable authoring name; `selection` is the canonical SDK form.
 // Run `bun cli.ts models --check` after SDK or backend model-schema drift.
@@ -164,31 +177,166 @@ export const MODEL_CATALOG: ModelProfile[] = [
   },
 ];
 
+function readEnvOverride(name: string): string | undefined {
+  const raw = process.env[name]?.trim();
+  return raw || undefined;
+}
+
+/** True when `spec` looks like a JSON ModelSelection object literal. */
+export function looksLikeSelectionJson(spec: string): boolean {
+  return spec.trimStart().startsWith("{");
+}
+
+/**
+ * Parse a dual-format model override: catalog slug, bare model id, or JSON
+ * `ModelSelection` (`{"id":"…","params":[…]}`).
+ *
+ * JSON form is for models not yet in MODEL_CATALOG (e.g. composer-2.5) where
+ * a bare `{ id: slug }` would lose required params or fail `invalid_model`.
+ */
+export function parseModelSelectionJson(raw: string): ModelSelection {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(
+      `invalid model selection JSON: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+  if (
+    parsed === null ||
+    typeof parsed !== "object" ||
+    Array.isArray(parsed) ||
+    typeof (parsed as { id?: unknown }).id !== "string" ||
+    !(parsed as { id: string }).id.trim()
+  ) {
+    throw new Error(
+      'invalid model selection JSON: expected {"id":"<model-id>", "params"?: [{"id","value"}, ...]}'
+    );
+  }
+  const obj = parsed as { id: string; params?: unknown };
+  const selection: ModelSelection = { id: obj.id.trim() };
+  if (obj.params !== undefined) {
+    if (!Array.isArray(obj.params)) {
+      throw new Error(
+        'invalid model selection JSON: "params" must be an array of {id, value}'
+      );
+    }
+    const params: { id: string; value: string }[] = [];
+    for (const p of obj.params) {
+      if (
+        p === null ||
+        typeof p !== "object" ||
+        typeof (p as { id?: unknown }).id !== "string" ||
+        typeof (p as { value?: unknown }).value !== "string"
+      ) {
+        throw new Error(
+          "invalid model selection JSON: each params entry must be {id: string, value: string}"
+        );
+      }
+      params.push({
+        id: (p as { id: string }).id,
+        value: (p as { value: string }).value,
+      });
+    }
+    selection.params = params;
+  }
+  return selection;
+}
+
+/** Compact label for catalog / attention logs. */
+export function formatModelSelectionLabel(selection: ModelSelection): string {
+  if (!selection.params?.length) return selection.id;
+  const params = selection.params.map(p => `${p.id}=${p.value}`).join(", ");
+  return `${selection.id} (${params})`;
+}
+
+/**
+ * Fallback model spec when `tasks[].model` is omitted.
+ * Returns a catalog slug, bare id, or JSON ModelSelection string from env.
+ */
 export function defaultModelForType(type: TaskType): string {
+  const fromEnv = readEnvOverride(MODEL_ENV_BY_TYPE[type]);
+  if (fromEnv) return fromEnv;
+
   const match = MODEL_CATALOG.find(m => m.defaultFor?.includes(type));
   if (!match)
     throw new Error(`MODEL_CATALOG missing default for TaskType "${type}"`);
   return match.slug;
 }
 
+/** Kickoff `--model` default: ORCHESTRATE_MODEL_ROOT, else catalog root default. */
+export function defaultRootModel(): string {
+  return readEnvOverride(MODEL_ENV_ROOT) ?? DEFAULT_ROOT_MODEL;
+}
+
 export function isKnownModel(slug: string): boolean {
+  if (looksLikeSelectionJson(slug)) return false;
   return MODEL_CATALOG.some(m => m.slug === slug);
 }
 
-/** Unknown slugs pass through as a bare `{ id }` so planners can reach
- * server-side models that aren't in our prescriptive catalog. */
-export function resolveModelSelection(slug: string): ModelSelection {
-  const profile = MODEL_CATALOG.find(m => m.slug === slug);
-  return profile ? profile.selection : { id: slug };
+/**
+ * Resolve an authoring slug, bare model id, or JSON ModelSelection into the
+ * canonical SDK form passed to `Agent.create({ model })`.
+ */
+export function resolveModelSelection(spec: string): ModelSelection {
+  const trimmed = spec.trim();
+  if (looksLikeSelectionJson(trimmed)) {
+    return parseModelSelectionJson(trimmed);
+  }
+  const profile = MODEL_CATALOG.find(m => m.slug === trimmed);
+  return profile ? profile.selection : { id: trimmed };
+}
+
+/** Effective default label per task type (catalog or env override). */
+export function effectiveDefaultLabelForType(type: TaskType): string {
+  const spec = defaultModelForType(type);
+  if (looksLikeSelectionJson(spec)) {
+    return formatModelSelectionLabel(parseModelSelectionJson(spec));
+  }
+  return spec;
 }
 
 export function renderModelCatalog(): string {
+  const types: TaskType[] = ["worker", "subplanner", "verifier"];
+  const effectiveByType = new Map<TaskType, string>();
+  for (const type of types) {
+    effectiveByType.set(type, effectiveDefaultLabelForType(type));
+  }
+
+  // Map catalog slug → roles that currently default to it (after env overrides).
+  const defaultsBySlug = new Map<string, TaskType[]>();
+  const nonCatalogDefaults: { type: TaskType; label: string }[] = [];
+  for (const type of types) {
+    const label = effectiveByType.get(type);
+    if (label === undefined) continue;
+    if (isKnownModel(label)) {
+      const list = defaultsBySlug.get(label) ?? [];
+      list.push(type);
+      defaultsBySlug.set(label, list);
+    } else {
+      nonCatalogDefaults.push({ type, label });
+    }
+  }
+
   const lines: string[] = [];
+  if (nonCatalogDefaults.length) {
+    lines.push(
+      "Env default overrides (not in MODEL_CATALOG; used when `tasks[].model` is omitted):"
+    );
+    for (const { type, label } of nonCatalogDefaults) {
+      const envName = MODEL_ENV_BY_TYPE[type];
+      lines.push(`- ${type}: \`${label}\` (from ${envName})`);
+    }
+    lines.push("");
+  }
+
   for (const m of MODEL_CATALOG) {
-    const defaults = m.defaultFor?.length
-      ? ` (default for ${m.defaultFor.join(", ")})`
+    const defaults = defaultsBySlug.get(m.slug);
+    const defaultsNote = defaults?.length
+      ? ` (default for ${defaults.join(", ")})`
       : "";
-    lines.push(`- \`${m.slug}\` — ${m.summary}${defaults}`);
+    lines.push(`- \`${m.slug}\` — ${m.summary}${defaultsNote}`);
     lines.push(`  speed: ${m.speed}; strengths: ${m.strengths.join(", ")}`);
     lines.push(`  use: ${m.use}`);
   }

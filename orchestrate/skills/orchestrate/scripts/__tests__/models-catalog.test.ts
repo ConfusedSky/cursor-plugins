@@ -1,11 +1,37 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
 import {
   defaultModelForType,
   isKnownModel,
   MODEL_CATALOG,
+  MODEL_ENV_BY_TYPE,
+  MODEL_ENV_ROOT,
   resolveModelSelection,
 } from "../models.ts";
+
+const ENV_KEYS = [
+  MODEL_ENV_BY_TYPE.worker,
+  MODEL_ENV_BY_TYPE.subplanner,
+  MODEL_ENV_BY_TYPE.verifier,
+  MODEL_ENV_ROOT,
+] as const;
+
+const savedEnv: Record<string, string | undefined> = {};
+
+beforeEach(() => {
+  for (const key of ENV_KEYS) {
+    savedEnv[key] = process.env[key];
+    delete process.env[key];
+  }
+});
+
+afterEach(() => {
+  for (const key of ENV_KEYS) {
+    const prior = savedEnv[key];
+    if (prior === undefined) delete process.env[key];
+    else process.env[key] = prior;
+  }
+});
 
 describe("MODEL_CATALOG", () => {
   test("every catalog entry passes isKnownModel", () => {

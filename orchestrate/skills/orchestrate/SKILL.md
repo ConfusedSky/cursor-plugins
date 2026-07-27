@@ -14,6 +14,7 @@ An explicit `/orchestrate <goal>` fans out a large task across parallel Cursor c
 
 - `CURSOR_API_KEY` must be a personal/user key. Create it from [Cursor Dashboard > Integrations](https://cursor.com/dashboard/integrations), then read `cursor-sdk` Auth before using it.
 - `SLACK_BOT_TOKEN` is optional. When set, pass `--slack-channel <id>` to `kickoff` or the first `run --root`, or set `SLACK_CHANNEL_ID`. The script stores the channel in `plan.slackChannel`, posts the kickoff thread there, mirrors task status, and reads Andon reactions. When the token is unset, the script logs once and runs without Slack visibility; correctness does not change.
+- Optional model defaults: `ORCHESTRATE_MODEL_WORKER`, `ORCHESTRATE_MODEL_SUBPLANNER`, `ORCHESTRATE_MODEL_VERIFIER`, and `ORCHESTRATE_MODEL_ROOT` override catalog fallbacks when `tasks[].model` / kickoff `--model` is omitted. Each value may be a catalog slug, a bare model id, or a JSON `ModelSelection` (e.g. `{"id":"composer-2.5"}`) for models not yet in the catalog. See the plugin README.
 
 ## Core principles
 

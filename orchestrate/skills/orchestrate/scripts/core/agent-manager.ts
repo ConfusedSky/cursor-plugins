@@ -140,6 +140,7 @@ import {
 import {
   defaultModelForType,
   isKnownModel,
+  looksLikeSelectionJson,
   resolveModelSelection,
 } from "../models.ts";
 import { AndonPoller, SlackReactionAndonSource } from "./andon.ts";
@@ -618,9 +619,13 @@ export class AgentManager {
     const attemptNumber = attemptsBefore + 1;
     this.touch(s, { attempts: attemptNumber });
 
-    if (def.model && !isKnownModel(def.model)) {
+    const modelSpec = def.model ?? defaultModelForType(def.type);
+    // JSON ModelSelection overrides intentionally bypass the catalog. Bare
+    // unknown slugs still warn — they fall through to `{ id }` and may
+    // `invalid_model` if the backend needs params.
+    if (!looksLikeSelectionJson(modelSpec) && !isKnownModel(modelSpec)) {
       this.logAttention(
-        `${def.name}: model "${def.model}" not in MODEL_CATALOG (spawning anyway). Run \`bun cli.ts models\` to see known slugs.`
+        `${def.name}: model "${modelSpec}" not in MODEL_CATALOG (spawning anyway). Run \`bun cli.ts models\` to see known slugs, or set a JSON ModelSelection via ORCHESTRATE_MODEL_* / tasks[].model.`
       );
     }
 
@@ -634,9 +639,7 @@ export class AgentManager {
         const agent = await Agent.create({
           apiKey: this.apiKey,
           name: `${this.plan.rootSlug}/${def.name}`,
-          model: resolveModelSelection(
-            def.model ?? defaultModelForType(def.type)
-          ),
+          model: resolveModelSelection(modelSpec),
           cloud: {
             repos: [{ url: this.plan.repoUrl, startingRef }],
             autoCreatePR: def.openPR ?? false,
