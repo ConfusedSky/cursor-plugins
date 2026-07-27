@@ -1,7 +1,8 @@
 #!/usr/bin/env bun
 import { Command } from "commander";
 
-import { assertModelEnvConfig, ModelConfigError } from "../models.ts";
+import { PlanValidationError } from "../errors.ts";
+import { assertModelEnvConfig } from "../models.ts";
 import { registerAndonCommands } from "./andon.ts";
 import { registerCommentCommands } from "./comments.ts";
 import { registerForensicsCommands } from "./forensics.ts";
@@ -12,8 +13,8 @@ export async function main(argv: string[] = process.argv): Promise<void> {
   try {
     assertModelEnvConfig();
   } catch (err) {
-    if (err instanceof ModelConfigError) {
-      console.error(`orchestrate model config: ${err.message}`);
+    if (err instanceof PlanValidationError) {
+      console.error(err.message);
       process.exit(2);
     }
     throw err;

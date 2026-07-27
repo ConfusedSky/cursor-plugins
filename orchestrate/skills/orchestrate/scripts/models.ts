@@ -1,27 +1,18 @@
 import type { ModelSelection } from "@cursor/sdk";
 
 import type { TaskType } from "./adapters/types.ts";
+import { PlanValidationError } from "./errors.ts";
+import { type ModelProfile, parseModelCatalogJson } from "./schemas.ts";
+
+export type { ModelProfile };
 
 // Built-in model catalog, used when ORCHESTRATE_MODEL_CATALOG is unset.
 // `defaultFor` supplies the model for a task type when `tasks[].model` is
 // omitted. Root planners take their model from kickoff `--model`, not here.
 
-export interface ModelProfile {
-  /** User-facing slug for `tasks[].model` and `--model` flags. */
-  slug: string;
-  /** Canonical SDK selection passed to `Agent.create({ model })`. */
-  selection: ModelSelection;
-  summary: string;
-  strengths: string[];
-  speed: "fast" | "medium" | "slow";
-  use: string;
-  /** Task types this profile is the default for. */
-  defaultFor?: TaskType[];
-}
-
 /**
- * Env var holding the whole catalog as JSON. When set it replaces
- * MODEL_CATALOG outright; entries may still reference a built-in by slug.
+ * Env var holding the whole catalog as JSON, in the same shape as
+ * MODEL_CATALOG below. When set it replaces MODEL_CATALOG outright.
  */
 export const MODEL_ENV_CATALOG = "ORCHESTRATE_MODEL_CATALOG";
 
@@ -173,110 +164,26 @@ export const MODEL_CATALOG: ModelProfile[] = [
   },
 ];
 
-/** Raised when ORCHESTRATE_MODEL_CATALOG can't be read as a catalog. */
-export class ModelConfigError extends Error {}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-/**
- * Build one catalog entry. An entry with `id` (plus optional `params`)
- * defines a model; an entry with only `slug` pulls in the built-in profile of
- * that name, so operators can list a curated subset without retyping SDK
- * params. Descriptive fields are taken as given: a wrong value shows up in the
- * next spawn, which beats validating shapes that drift as models change.
- */
-function toModelProfile(
-  raw: Record<string, unknown>,
-  ctx: string
-): ModelProfile {
-  const slug = typeof raw.slug === "string" ? raw.slug.trim() : undefined;
-  const defaultFor = Array.isArray(raw.defaultFor)
-    ? (raw.defaultFor as TaskType[])
-    : undefined;
-
-  if (raw.id === undefined) {
-    const builtin = MODEL_CATALOG.find(m => m.slug === slug);
-    if (!builtin) {
-      throw new ModelConfigError(
-        `${ctx}: needs an "id" to define a model, or a "slug" naming a built-in one (got ${JSON.stringify(slug ?? null)})`
-      );
-    }
-    return { ...builtin, defaultFor: defaultFor ?? builtin.defaultFor };
-  }
-
-  if (typeof raw.id !== "string") {
-    throw new ModelConfigError(`${ctx}: "id" must be a string`);
-  }
-  const selection: ModelSelection = { id: raw.id };
-  if (Array.isArray(raw.params)) {
-    selection.params = raw.params as ModelSelection["params"];
-  }
-  return {
-    slug: slug ?? raw.id,
-    selection,
-    summary:
-      typeof raw.summary === "string"
-        ? raw.summary
-        : `Configured for this repo via ${MODEL_ENV_CATALOG}.`,
-    strengths: Array.isArray(raw.strengths) ? (raw.strengths as string[]) : [],
-    speed:
-      typeof raw.speed === "string"
-        ? (raw.speed as ModelProfile["speed"])
-        : "medium",
-    use:
-      typeof raw.use === "string"
-        ? raw.use
-        : "Prefer this unless the task needs a listed specialist.",
-    defaultFor,
-  };
-}
-
-function readEnvCatalog(): ModelProfile[] | undefined {
-  const raw = process.env[MODEL_ENV_CATALOG]?.trim();
-  if (!raw) return undefined;
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (err) {
-    throw new ModelConfigError(
-      `${MODEL_ENV_CATALOG}: ${err instanceof Error ? err.message : String(err)}`
-    );
-  }
-  if (!Array.isArray(parsed)) {
-    throw new ModelConfigError(
-      `${MODEL_ENV_CATALOG}: expected a JSON array of model entries`
-    );
-  }
-  return parsed.map((item, i) => {
-    const ctx = `${MODEL_ENV_CATALOG}[${i}]`;
-    if (!isPlainObject(item)) {
-      throw new ModelConfigError(`${ctx}: expected a JSON object`);
-    }
-    return toModelProfile(item, ctx);
-  });
+function envCatalogJson(): string | undefined {
+  return process.env[MODEL_ENV_CATALOG]?.trim() || undefined;
 }
 
 /**
  * The catalog planners choose from. ORCHESTRATE_MODEL_CATALOG replaces
  * MODEL_CATALOG outright when set; there is no merging, so the configured
- * list is the complete menu. Built per call so env changes apply on the spot.
+ * list is the complete menu. Read per call so env changes apply on the spot.
  */
 export function effectiveModelCatalog(): ModelProfile[] {
-  return readEnvCatalog() ?? MODEL_CATALOG;
+  const raw = envCatalogJson();
+  return raw ? parseModelCatalogJson(raw, MODEL_ENV_CATALOG) : MODEL_CATALOG;
 }
 
 /** Model slug for a task type when `tasks[].model` is omitted. */
 export function defaultModelForType(type: TaskType): string {
-  const catalog = readEnvCatalog();
-  const match = (catalog ?? MODEL_CATALOG).find(m =>
-    m.defaultFor?.includes(type)
-  );
+  const match = effectiveModelCatalog().find(m => m.defaultFor?.includes(type));
   if (match) return match.slug;
-  throw new ModelConfigError(
-    catalog
+  throw new PlanValidationError(
+    envCatalogJson()
       ? `${MODEL_ENV_CATALOG} has no ${type} default. Add "defaultFor": ["${type}"] to one entry.`
       : `MODEL_CATALOG missing default for TaskType "${type}"`
   );
@@ -302,15 +209,14 @@ export function assertModelEnvConfig(): void {
 }
 
 export function renderModelCatalog(): string {
-  const envCatalog = readEnvCatalog();
   const lines: string[] = [];
-  if (envCatalog) {
+  if (envCatalogJson()) {
     lines.push(
       "This repo publishes an exact model menu. Use only the slugs listed below; do not reach for models outside this list."
     );
     lines.push("");
   }
-  for (const m of envCatalog ?? MODEL_CATALOG) {
+  for (const m of effectiveModelCatalog()) {
     const defaults = m.defaultFor?.length
       ? ` (default for ${m.defaultFor.join(", ")})`
       : "";

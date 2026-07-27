@@ -1,17 +1,33 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
+import { PlanValidationError } from "../errors.ts";
 import {
   assertModelEnvConfig,
   defaultModelForType,
   effectiveModelCatalog,
   isKnownModel,
+  MODEL_CATALOG,
   MODEL_ENV_CATALOG,
-  ModelConfigError,
   renderModelCatalog,
   resolveModelSelection,
 } from "../models.ts";
 
 let saved: string | undefined;
+
+/** A minimally complete entry; every field the schema requires. */
+function entry(
+  overrides: Record<string, unknown> = {}
+): Record<string, unknown> {
+  return {
+    slug: "house-worker",
+    selection: { id: "composer-2.5" },
+    summary: "House worker model.",
+    strengths: ["throughput"],
+    speed: "fast",
+    use: "Use for all bounded implementation work.",
+    ...overrides,
+  };
+}
 
 function setCatalog(entries: unknown): void {
   process.env[MODEL_ENV_CATALOG] = JSON.stringify(entries);
@@ -29,70 +45,62 @@ afterEach(() => {
 
 describe("ORCHESTRATE_MODEL_CATALOG unset", () => {
   test("the built-in catalog is in effect", () => {
-    expect(effectiveModelCatalog()).toBe(
-      // Same array identity: no copying or merging when env is unset.
-      effectiveModelCatalog()
-    );
+    expect(effectiveModelCatalog()).toBe(MODEL_CATALOG);
     expect(defaultModelForType("worker")).toBe("gpt-5.5-high-fast");
     expect(renderModelCatalog()).not.toContain("exact model menu");
   });
 
   test("whitespace-only value is treated as unset", () => {
     process.env[MODEL_ENV_CATALOG] = "   ";
-    expect(defaultModelForType("worker")).toBe("gpt-5.5-high-fast");
+    expect(effectiveModelCatalog()).toBe(MODEL_CATALOG);
   });
 });
 
 describe("ORCHESTRATE_MODEL_CATALOG replaces the built-in catalog", () => {
   test("only the listed models are published", () => {
-    setCatalog([
-      { id: "composer-2.5", summary: "Cheap worker.", defaultFor: ["worker"] },
-      { slug: "claude-opus-4-8", defaultFor: ["subplanner", "verifier"] },
-    ]);
-    expect(effectiveModelCatalog().map(m => m.slug)).toEqual([
-      "composer-2.5",
-      "claude-opus-4-8",
-    ]);
+    setCatalog([entry({ defaultFor: ["worker", "subplanner", "verifier"] })]);
+    expect(effectiveModelCatalog().map(m => m.slug)).toEqual(["house-worker"]);
     expect(isKnownModel("gpt-5.5-high-fast")).toBe(false);
-    expect(isKnownModel("composer-2.5")).toBe(true);
+    expect(isKnownModel("house-worker")).toBe(true);
   });
 
   test("entries supply every task type's default", () => {
     setCatalog([
-      { id: "composer-2.5", defaultFor: ["worker"] },
-      { slug: "claude-opus-4-8", defaultFor: ["subplanner", "verifier"] },
+      entry({ defaultFor: ["worker"] }),
+      entry({
+        slug: "house-planner",
+        selection: { id: "claude-opus-4-8" },
+        defaultFor: ["subplanner", "verifier"],
+      }),
     ]);
-    expect(defaultModelForType("worker")).toBe("composer-2.5");
-    expect(defaultModelForType("subplanner")).toBe("claude-opus-4-8");
-    expect(defaultModelForType("verifier")).toBe("claude-opus-4-8");
+    expect(defaultModelForType("worker")).toBe("house-worker");
+    expect(defaultModelForType("subplanner")).toBe("house-planner");
+    expect(defaultModelForType("verifier")).toBe("house-planner");
   });
 
-  test("slug-only entry pulls in a built-in with its params", () => {
-    setCatalog([{ slug: "composer-2-fast", defaultFor: ["worker"] }]);
-    expect(resolveModelSelection("composer-2-fast")).toEqual({
-      id: "composer-2",
-      params: [{ id: "fast", value: "true" }],
-    });
-    expect(defaultModelForType("worker")).toBe("composer-2-fast");
-  });
-
-  test("a defined entry round-trips by slug with its params", () => {
+  test("a slug resolves to its full selection, params included", () => {
     setCatalog([
-      {
-        slug: "house-worker",
-        id: "composer-2.5",
-        params: [{ id: "fast", value: "true" }],
-        summary: "House worker model.",
-        use: "Use for all bounded implementation work.",
-        speed: "fast",
-        strengths: ["throughput"],
-        defaultFor: ["worker"],
-      },
+      entry({
+        selection: {
+          id: "composer-2.5",
+          params: [{ id: "fast", value: "true" }],
+        },
+        defaultFor: ["worker", "subplanner", "verifier"],
+      }),
     ]);
     expect(resolveModelSelection("house-worker")).toEqual({
       id: "composer-2.5",
       params: [{ id: "fast", value: "true" }],
     });
+  });
+
+  test("a model outside the catalog still passes through as a bare id", () => {
+    setCatalog([entry({ defaultFor: ["worker", "subplanner", "verifier"] })]);
+    expect(resolveModelSelection("gpt-5.5")).toEqual({ id: "gpt-5.5" });
+  });
+
+  test("the rendered catalog is what planners see", () => {
+    setCatalog([entry({ defaultFor: ["worker"] })]);
     const text = renderModelCatalog();
     expect(text).toContain("exact model menu");
     expect(text).toContain("`house-worker` — House worker model.");
@@ -100,67 +108,65 @@ describe("ORCHESTRATE_MODEL_CATALOG replaces the built-in catalog", () => {
     expect(text).toContain("speed: fast; strengths: throughput");
   });
 
-  test("slug defaults to the id and prose is filled in", () => {
-    setCatalog([{ id: "composer-2.5", defaultFor: ["worker"] }]);
-    const [entry] = effectiveModelCatalog();
-    expect(entry.slug).toBe("composer-2.5");
-    expect(entry.summary).toContain("ORCHESTRATE_MODEL_CATALOG");
-    expect(entry.speed).toBe("medium");
-  });
-
-  test("a model outside the catalog still passes through as a bare id", () => {
-    setCatalog([{ id: "composer-2.5", defaultFor: ["worker"] }]);
-    expect(resolveModelSelection("gpt-5.5")).toEqual({ id: "gpt-5.5" });
-  });
-
-  // Descriptive fields are passed through rather than validated, so new model
-  // vocabulary doesn't require a plugin release.
-  test("unrecognized descriptive values are passed through", () => {
+  // `speed` is a free-form string so new model vocabulary doesn't require a
+  // plugin release.
+  test("unrecognized speed values are passed through", () => {
     setCatalog([
-      {
-        id: "composer-2.5",
+      entry({
         speed: "blistering",
-        strengths: ["novel-capability"],
         defaultFor: ["worker", "subplanner", "verifier"],
-      },
+      }),
     ]);
-    expect(renderModelCatalog()).toContain(
-      "speed: blistering; strengths: novel-capability"
-    );
+    expect(renderModelCatalog()).toContain("speed: blistering");
+    expect(() => assertModelEnvConfig()).not.toThrow();
+  });
+
+  test("the built-in catalog round-trips through the schema", () => {
+    // `bun cli.ts models --json` is documented as a starting point, so its
+    // output has to be valid input.
+    setCatalog(MODEL_CATALOG);
+    expect(effectiveModelCatalog()).toEqual(MODEL_CATALOG);
     expect(() => assertModelEnvConfig()).not.toThrow();
   });
 });
 
 describe("catalog config errors", () => {
   test("a missing task-type default fails fast at startup", () => {
-    setCatalog([{ id: "composer-2.5", defaultFor: ["worker"] }]);
-    expect(() => assertModelEnvConfig()).toThrow(ModelConfigError);
+    setCatalog([entry({ defaultFor: ["worker"] })]);
+    expect(() => assertModelEnvConfig()).toThrow(PlanValidationError);
     expect(() => assertModelEnvConfig()).toThrow(
       /no subplanner default.*"defaultFor": \["subplanner"\]/s
     );
   });
 
   test("assertModelEnvConfig passes when every task type resolves", () => {
-    setCatalog([
-      { id: "composer-2.5", defaultFor: ["worker"] },
-      { slug: "claude-opus-4-8", defaultFor: ["subplanner", "verifier"] },
-    ]);
+    setCatalog([entry({ defaultFor: ["worker", "subplanner", "verifier"] })]);
     expect(() => assertModelEnvConfig()).not.toThrow();
   });
 
-  test("malformed JSON and non-arrays are rejected", () => {
-    process.env[MODEL_ENV_CATALOG] = "[{id:}]";
-    expect(() => effectiveModelCatalog()).toThrow(ModelConfigError);
-
-    process.env[MODEL_ENV_CATALOG] = '{"id":"x"}';
-    expect(() => effectiveModelCatalog()).toThrow(/expected a JSON array/);
+  test("malformed JSON is rejected", () => {
+    process.env[MODEL_ENV_CATALOG] = "[{slug:}]";
+    expect(() => effectiveModelCatalog()).toThrow(/is not valid JSON/);
   });
 
-  test("an entry with neither id nor a known slug is rejected", () => {
-    setCatalog([{ slug: "not-a-builtin" }]);
-    expect(() => effectiveModelCatalog()).toThrow(/needs an "id"/);
+  test("an incomplete entry is rejected with the offending field", () => {
+    const { summary, ...withoutSummary } = entry();
+    expect(summary).toBeDefined();
+    setCatalog([withoutSummary]);
+    expect(() => effectiveModelCatalog()).toThrow(PlanValidationError);
+    expect(() => effectiveModelCatalog()).toThrow(/\[0\]\.summary/);
+  });
 
-    setCatalog([{ summary: "no id or slug" }]);
-    expect(() => effectiveModelCatalog()).toThrow(/needs an "id"/);
+  test("a bad selection or defaultFor is rejected", () => {
+    setCatalog([entry({ selection: { id: "" } })]);
+    expect(() => effectiveModelCatalog()).toThrow(/\[0\]\.selection\.id/);
+
+    setCatalog([entry({ defaultFor: ["planner"] })]);
+    expect(() => effectiveModelCatalog()).toThrow(/\[0\]\.defaultFor/);
+  });
+
+  test("a non-array value is rejected", () => {
+    process.env[MODEL_ENV_CATALOG] = '{"slug":"x"}';
+    expect(() => effectiveModelCatalog()).toThrow(PlanValidationError);
   });
 });

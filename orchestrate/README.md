@@ -12,48 +12,56 @@ The skill itself lives in [`skills/orchestrate/SKILL.md`](./skills/orchestrate/S
 
 ## Model catalog (optional)
 
-`ORCHESTRATE_MODEL_CATALOG` replaces the built-in model catalog with your own. When it is set, that list is the complete menu: it is what planners choose `tasks[].model` from, what `bun cli.ts models` prints, and where role defaults come from. Nothing is merged with the built-in catalog, so what you write is exactly what runs. Use it to steer cost without editing the plugin.
+`ORCHESTRATE_MODEL_CATALOG` replaces the built-in model catalog with your own. When it is set, that list is the complete menu: it is what planners choose `tasks[].model` from, what `bun cli.ts models` prints, and where each task type's default comes from. Nothing is merged with the built-in catalog, so what you write is exactly what runs. Use it to steer cost without editing the plugin.
+
+The value is a JSON array in the same shape as the built-in catalog, validated against [`skills/orchestrate/schemas/model-catalog.schema.json`](./skills/orchestrate/schemas/model-catalog.schema.json). Start from the built-in list rather than writing entries by hand:
 
 ```bash
-export ORCHESTRATE_MODEL_CATALOG='[
-  {"id":"composer-2.5","summary":"Cheap, fast worker.","defaultFor":["worker"]},
-  {"slug":"claude-opus-4-8","defaultFor":["subplanner","verifier"]}
-]'
+bun skills/orchestrate/scripts/cli.ts models --json > catalog.json
+# edit catalog.json: drop what you don't want, move defaultFor where you want it
+export ORCHESTRATE_MODEL_CATALOG="$(cat catalog.json)"
 ```
 
-### Entries
+Every entry needs `slug`, `selection`, `summary`, `strengths`, `speed`, and `use`. `defaultFor` and `selection.params` are optional:
 
-An entry either **defines** a model or **references** a built-in one:
-
-- `"id"` (plus optional `"params"`) defines a model. `"slug"` names it for `tasks[].model`, defaulting to the id.
-- `"slug"` alone pulls in the built-in profile of that name, so you can curate a subset without retyping SDK params. Run `bun cli.ts models` with the variable unset to see the built-in slugs.
-
-`"defaultFor"` claims task types, and each of `worker`, `subplanner`, and `verifier` needs a default somewhere in the list. Root planners are not part of the catalog; they take their model from kickoff `--model`, which defaults to `claude-opus-4-8`.
-
-Optional prose fields are worth filling in, because planners choose by capability, not by name:
-
-```bash
-export ORCHESTRATE_MODEL_CATALOG='[
+```json
+[
   {
-    "slug":"house-worker",
-    "id":"composer-2.5",
-    "params":[{"id":"fast","value":"true"}],
-    "summary":"House worker model.",
-    "use":"Use for all bounded implementation work.",
-    "speed":"fast",
-    "strengths":["throughput"],
-    "defaultFor":["worker"]
+    "slug": "house-worker",
+    "selection": { "id": "composer-2.5", "params": [{ "id": "fast", "value": "true" }] },
+    "summary": "Cheap, fast worker.",
+    "strengths": ["throughput", "well-scoped implementation"],
+    "speed": "fast",
+    "use": "Use for all bounded implementation work.",
+    "defaultFor": ["worker"]
   },
-  {"slug":"claude-opus-4-8","defaultFor":["subplanner","verifier"]}
-]'
+  {
+    "slug": "house-planner",
+    "selection": { "id": "claude-opus-4-8" },
+    "summary": "Frontier judgment for decomposition and acceptance checks.",
+    "strengths": ["judgment", "ambiguity resolution"],
+    "speed": "slow",
+    "use": "Use when the work needs design decisions rather than execution.",
+    "defaultFor": ["subplanner", "verifier"]
+  }
+]
 ```
+
+`summary`, `strengths`, and `use` are required because planners select by capability, not by model name. An entry with thin prose tends to get passed over. `speed` is a free-form string, so new model vocabulary doesn't need a plugin release.
+
+Each of `worker`, `subplanner`, and `verifier` needs a `defaultFor` somewhere in the list. Root planners are not part of the catalog; they take their model from kickoff `--model`, which defaults to `claude-opus-4-8`.
 
 ### Precedence
 
 1. Explicit `tasks[].model` in the plan
 2. The `defaultFor` entry for that task's type
 
-Run `bun cli.ts models` to print the effective catalog, and `bun cli.ts models --check` to probe every entry against `/v1/agents`. Config the CLI can't read as a catalog (bad JSON, not an array, an entry with neither `id` nor a known built-in `slug`, no default for a task type) exits 2 at startup with the offending index named, rather than failing mid-run. Descriptive fields like `speed` and `strengths` are passed through as written rather than checked against a fixed vocabulary, so a wrong value shows up in the rendered catalog instead of blocking the run.
+Run `bun cli.ts models` to print the catalog in effect, and `bun cli.ts models --check` to probe every entry against `/v1/agents`. Invalid config exits 2 at startup, naming the offending entry and field, rather than failing mid-run:
+
+```
+ORCHESTRATE_MODEL_CATALOG failed zod validation:
+  [0].summary: Required
+```
 
 Two caveats. This shapes what planners choose from, but a planner can still write any model id into `tasks[].model`, so it is guidance rather than a spend ceiling. And each spawned agent reads its own environment: set the variable as a Cursor Cloud secret for the repo so subplanners and workers inherit it, not just in the dispatcher's local shell.
 
