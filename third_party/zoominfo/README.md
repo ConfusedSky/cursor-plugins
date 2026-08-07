@@ -18,14 +18,23 @@ Or run `/add-plugin zoominfo` in chat.
 {
   "mcpServers": {
     "zoominfo": {
-      "type": "http",
-      "url": "https://mcp.zoominfo.com/mcp"
+      "command": "npx",
+      "args": [
+        "-y",
+        "mcp-remote@0.1.38",
+        "https://mcp.zoominfo.com/mcp",
+        "46818",
+        "--static-oauth-client-metadata",
+        "{\"scope\":\"openid profile email offline_access zi_api zi_mcp api:data:mcp\"}"
+      ]
     }
   }
 }
 ```
 
-Auth is OAuth 2.0 against ZoomInfo, including organization SSO. Cursor prompts for ZoomInfo sign-in when the plugin connects — there is no API key to configure.
+ZoomInfo's server does not yet complete OAuth discovery with Cursor's native HTTP client, so the plugin connects through the `mcp-remote` stdio bridge, which runs the OAuth flow locally. This needs Node.js (`npx`) on your machine.
+
+Auth is OAuth 2.0 against ZoomInfo, including organization SSO. The bridge opens ZoomInfo sign-in in your browser on first connect and reuses cached tokens afterwards — there is no API key to configure.
 
 ## Before you connect
 
